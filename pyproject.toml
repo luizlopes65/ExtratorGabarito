@@ -1,0 +1,24 @@
+[project]
+name = "ocr-project"
+version = "0.1.0"
+description = "A generic Python project"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.poetry]
+# Poetry configuration can be added here
+# The project currently does not expose a package directory, so we omit the
+# packages section. If you later add a package directory, add it here.
+
+[tool.poetry.dependencies]
+opencv-python = "^4.10"
+numpy = "^1.26"
+pandas = "^2.2"
+ollama = "^0.6.1"
+pillow = "^12.2.0"
+pydantic = "^2.12.5"
+pytesseract = "^0.3.13"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
