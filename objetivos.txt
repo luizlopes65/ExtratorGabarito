@@ -1,0 +1,8 @@
+O projeto consiste em automatizar a digitalização de gabaritos de avaliações diagnósticas.
+A tarefa será considerada cumprida quando:
+    a ) Dado uma imagem de gabarito, escaneada ou fotografada, é extraída uma tabela relacionando cada aluno, cada questão e a sua resposta;
+        - Isso inclui lidar com bolinhas não preenchidas, espaços para adição de nomes extras de alunos e imagens em qualquer orientação (vertical, horizontal...);
+        - Cada imagem deve ser processada o mais eficiente possível (tempo/imagem);
+    b ) Dada uma amostra de imagens e a relação questão - assunto, produzir um mapa de calor que mapeia resultados - assuntos.
+    c ) Relatório de possíveis falhas, eficiência e eficácia da abordagem.
+O prazo estipulado é de 45 dias (até 26/05/2026).

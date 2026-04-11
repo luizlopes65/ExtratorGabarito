@@ -1,0 +1,42 @@
+{
+    "L1": {
+        "tipo": "Vertical",
+        "x": 49
+    },
+    "L2": {
+        "tipo": "Vertical",
+        "x": 400
+    },
+    "L3": {
+        "tipo": "Horizontal",
+        "y": 212
+    },
+    "L4": {
+        "tipo": "Horizontal",
+        "y": 242
+    },
+    "L5": {
+        "tipo": "Horizontal",
+        "y": 273
+    },
+    "L6": {
+        "tipo": "Horizontal",
+        "y": 418
+    },
+    "L7": {
+        "tipo": "Horizontal",
+        "y": 563
+    },
+    "L8": {
+        "tipo": "Horizontal",
+        "y": 708
+    },
+    "L9": {
+        "tipo": "Horizontal",
+        "y": 853
+    },
+    "L10": {
+        "tipo": "Horizontal",
+        "y": 998
+    }
+}
