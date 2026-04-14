@@ -4,5 +4,5 @@ A tarefa será considerada cumprida quando:
         - Isso inclui lidar com bolinhas não preenchidas, espaços para adição de nomes extras de alunos e imagens em qualquer orientação (vertical, horizontal...);
         - Cada imagem deve ser processada o mais eficiente possível (tempo/imagem);
     b ) Dada uma amostra de imagens e a relação questão - assunto, produzir um mapa de calor que mapeia resultados - assuntos.
-    c ) Relatório de possíveis falhas, eficiência e eficácia da abordagem.
+    c ) Relatório de possíveis falhas assim como eficiência e eficácia da abordagem.
 O prazo estipulado é de 45 dias (até 26/05/2026).

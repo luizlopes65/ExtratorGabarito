@@ -12,6 +12,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Callable
 from collections import defaultdict
+import concurrent.futures
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -429,42 +430,72 @@ def identify_header_and_student_rows(img, row_intervals):
 
 @profile
 def ocr_headers(img, col_intervals, header_row):
-    y1, y2  = header_row
-    headers = []
-    for idx, (x1, x2) in enumerate(col_intervals):
+    y1, y2 = header_row
+    # Cria uma lista pré-alocada para manter a ordem correta
+    headers = [""] * len(col_intervals)
+    
+    def _process_header(idx, x1, x2):
         cell = crop(img, x1, y1, x2, y2, pad=3)
         if cell is None:
-            headers.append("")
-            continue
+            return idx, ""
+        
         text = clean_question_header(ocr_text_block(
             cell, psm=7,
             whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"
         ))
-        headers.append(text)
+        
+        # Opcional: manter o debug visual
         vis = cell.copy()
         cv2.putText(vis, text, (5, min(20, vis.shape[0]-5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
         save_debug(f"header_col_{idx+1}.png", vis)
+        
+        return idx, text
+
+    # Executa o OCR em paralelo
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(_process_header, idx, x1, x2) 
+                   for idx, (x1, x2) in enumerate(col_intervals)]
+        
+        for future in concurrent.futures.as_completed(futures):
+            idx, text = future.result()
+            headers[idx] = text
+
     return headers
+
 
 @profile
 def ocr_names(img, name_col, candidate_rows):
-    names   = []
-    x1, x2  = name_col
-    for i, (y1, y2) in enumerate(candidate_rows):
+    x1, x2 = name_col
+    # Cria uma lista pré-alocada para manter a ordem correta
+    names = [""] * len(candidate_rows)
+
+    def _process_name(idx, y1, y2):
         cell = crop(img, x1, y1, x2, y2, pad=4)
         if cell is None:
-            names.append("")
-            continue
+            return idx, ""
+        
         text = clean_name(ocr_text_block(cell, psm=6))
         if re.search(r"\bTOTAL\b", text.upper()):
-            names.append("__TOTAL__")
-        else:
-            names.append(text)
+            text = "__TOTAL__"
+            
+        # Opcional: manter o debug visual
         vis = cell.copy()
         cv2.putText(vis, (text or "(vazio)")[:40], (5, min(20, vis.shape[0]-5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-        save_debug(f"name_row_{i+1}.png", vis)
+        save_debug(f"name_row_{idx+1}.png", vis)
+        
+        return idx, text
+
+    # Executa o OCR em paralelo
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(_process_name, i, y1, y2) 
+                   for i, (y1, y2) in enumerate(candidate_rows)]
+        
+        for future in concurrent.futures.as_completed(futures):
+            idx, text = future.result()
+            names[idx] = text
+
     return names
 
 
