@@ -19,18 +19,21 @@ import concurrent.futures
 # ============================================================
 
 IMAGE_PATH = "examples/image.png"
-OUTPUT_CSV = "resultado_gabarito_v3.csv"
-DEBUG_DIR = "debug_gabarito_v3"
+OUTPUT_CSV = "resultados/resultado_gabarito_profiling.csv"
+DEBUG_DIR = "debug/debug_gabarito_profiling"
 
 TESSERACT_CMD = r"/opt/homebrew/bin/tesseract"
 OCR_LANG = "por+eng"
 OPTION_LABELS = ["B", "1", "2", "3"]
+OCR_MAX_WORKERS = 4
+ENABLE_DEBUG_IMAGES = False
+PROFILE_DETAILED = False
 
 MIN_EXPECTED_QUESTION_COLS = 8
 MIN_EXPECTED_STUDENT_ROWS = 3
 MAX_ROTATION_CORRECTION_DEGREES = 8
 GRID_CLUSTER_TOLERANCE = 12
-ROW_HEIGHT_MIN = 45
+ROW_HEIGHT_MIN = 30  # Reduced to capture shorter header rows (aligned with fixed version)
 COL_WIDTH_MIN = 25
 EXPECTED_NUM_QUESTIONS = None
 
@@ -53,6 +56,8 @@ def profile(fn: Callable) -> Callable:
     """Decorator leve: mede wall-time de cada chamada e acumula estatísticas."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        if not PROFILE_DETAILED:
+            return fn(*args, **kwargs)
         t0 = time.perf_counter()
         result = fn(*args, **kwargs)
         elapsed = time.perf_counter() - t0
@@ -162,6 +167,8 @@ Path(DEBUG_DIR).mkdir(exist_ok=True)
 # ============================================================
 
 def save_debug(name: str, img: np.ndarray):
+    if not ENABLE_DEBUG_IMAGES:
+        return
     cv2.imwrite(str(Path(DEBUG_DIR) / name), img)
 
 def to_gray(img: np.ndarray) -> np.ndarray:
@@ -262,7 +269,64 @@ def find_document_contour(gray: np.ndarray) -> Optional[np.ndarray]:
     return None
 
 @profile
+def detect_orientation(gray: np.ndarray) -> int:
+    """
+    Detecta a orientação do documento e retorna o ângulo de rotação necessário.
+    Retorna: 0, 90, 180, ou 270 graus (sentido anti-horário).
+    
+    Usa análise de texto OCR para determinar a orientação correta.
+    """
+    # Testa as 4 orientações possíveis
+    orientations = [0, 90, 180, 270]
+    best_score = -1
+    best_orientation = 0
+    
+    for angle in orientations:
+        # Rotaciona a imagem
+        if angle == 0:
+            test_img = gray
+        elif angle == 90:
+            test_img = cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif angle == 180:
+            test_img = cv2.rotate(gray, cv2.ROTATE_180)
+        else:  # 270
+            test_img = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+        
+        # Tenta OCR em uma região central (onde geralmente há texto)
+        h, w = test_img.shape
+        roi = test_img[h//4:3*h//4, w//4:3*w//4]
+        
+        try:
+            # Usa OSD (Orientation and Script Detection) do Tesseract
+            osd = pytesseract.image_to_osd(roi)
+            # Extrai o confidence score
+            conf_match = re.search(r'Orientation confidence: ([\d.]+)', osd)
+            if conf_match:
+                confidence = float(conf_match.group(1))
+                if confidence > best_score:
+                    best_score = confidence
+                    best_orientation = angle
+        except Exception:
+            # Se OSD falhar, tenta OCR normal e conta caracteres alfanuméricos
+            try:
+                text = pytesseract.image_to_string(roi, lang=OCR_LANG)
+                # Score baseado em caracteres alfanuméricos válidos
+                alnum_count = sum(c.isalnum() for c in text)
+                score = alnum_count / max(len(text), 1) * 100
+                if score > best_score:
+                    best_score = score
+                    best_orientation = angle
+            except Exception:
+                continue
+    
+    return best_orientation
+
+@profile
 def estimate_skew_angle(gray: np.ndarray) -> float:
+    """
+    Estima o ângulo de inclinação (skew) do documento.
+    Apenas para correções pequenas (±MAX_ROTATION_CORRECTION_DEGREES).
+    """
     bw = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 31, 12
@@ -288,13 +352,32 @@ def estimate_skew_angle(gray: np.ndarray) -> float:
 def preprocess_document(img: np.ndarray) -> np.ndarray:
     original = img.copy()
     gray     = to_gray(img)
-    doc      = find_document_contour(gray)
+    
+    # PASSO 1: Detectar e corrigir orientação principal (0°, 90°, 180°, 270°)
+    orientation = detect_orientation(gray)
+    if orientation != 0:
+        print(f"Detectada rotação de {orientation}° - corrigindo orientação...")
+        if orientation == 90:
+            img = cv2.rotate(original, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif orientation == 180:
+            img = cv2.rotate(original, cv2.ROTATE_180)
+        elif orientation == 270:
+            img = cv2.rotate(original, cv2.ROTATE_90_CLOCKWISE)
+        gray = to_gray(img)
+        save_debug("00_orientation_corrected.png", img)
+    
+    # PASSO 2: Detectar contorno do documento e aplicar transformação de perspectiva
+    doc = find_document_contour(gray)
     if doc is not None:
-        img = four_point_transform(original, doc)
+        img = four_point_transform(img, doc)
+    
+    # PASSO 3: Corrigir inclinação fina (skew) - apenas pequenos ângulos
     gray2 = to_gray(img)
     angle = estimate_skew_angle(gray2)
     if abs(angle) > 0.15:
+        print(f"Corrigindo inclinação de {angle:.2f}°...")
         img = rotate_image(img, angle * -1)
+    
     save_debug("01_preprocessed.png", img)
     return img
 
@@ -329,7 +412,7 @@ def extract_line_positions(line_img: np.ndarray, axis: str) -> List[int]:
             if h > 40: coords.append(x + w // 2)
         else:
             if w > 40: coords.append(y + h // 2)
-    return cluster_positions(coords, tolerance=GRID_CLUSTER_TOLERANCE)
+    return coords
 
 @profile
 def get_table_structure(img: np.ndarray):
@@ -383,22 +466,58 @@ def run_ocr_boxes(img: np.ndarray, psm: int = 6,
 def ocr_text_block(img: np.ndarray, psm: int = 6,
                    whitelist: Optional[str] = None) -> str:
     gray = to_gray(img)
+    
+    # Try with adaptive thresholding first
     proc = cv2.GaussianBlur(gray, (3, 3), 0)
     proc = cv2.adaptiveThreshold(proc, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                   cv2.THRESH_BINARY, 31, 10)
     config = f"--oem 3 --psm {psm}"
     if whitelist:
         config += f' -c tessedit_char_whitelist="{whitelist}"'
-    return normalize_whitespace(
+    
+    result = normalize_whitespace(
         pytesseract.image_to_string(proc, lang=OCR_LANG, config=config)
     )
+    
+    # If result is too short or doesn't contain expected patterns, try without preprocessing
+    if len(result) < 2 or not re.search(r"\d", result):
+        result_raw = normalize_whitespace(
+            pytesseract.image_to_string(gray, lang=OCR_LANG, config=config)
+        )
+        if len(result_raw) > len(result):
+            result = result_raw
+    
+    return result
 
 @profile
 def clean_question_header(text: str) -> str:
+    """
+    Extract question number from OCR text.
+    Handles formats like: 35-A, 35-B, 36-A, 37, 38-C, etc.
+    
+    When OCR returns text like "36 36-B", we want to extract "36-B" (the rightmost complete pattern).
+    """
     text = text.upper().replace(" ", "")
+    # Normalize different dash characters to standard hyphen
     text = text.replace("_", "-").replace(".", "-").replace("—", "-").replace("–", "-")
-    m = re.search(r"(\d{1,3}(?:-[A-Z])?)", text)
-    return m.group(1) if m else text
+    
+    # Find ALL matches of question number patterns (e.g., 35-A, 36-B, 37)
+    # Pattern: 1-3 digits, optionally followed by hyphen and letter
+    matches = re.findall(r"\d{1,3}(?:-[A-Z])?", text)
+    
+    if not matches:
+        # If no match, return cleaned text as-is for debugging
+        return text
+    
+    # If multiple matches found (e.g., ["36", "36-B"]), prefer the one with a letter suffix
+    # This handles cases where OCR captures both "36" and "36-B" in the same cell
+    matches_with_suffix = [m for m in matches if "-" in m]
+    if matches_with_suffix:
+        # Return the last (rightmost) match with a suffix
+        return matches_with_suffix[-1]
+    
+    # Otherwise, return the last match
+    return matches[-1]
 
 @profile
 def clean_name(text: str) -> str:
@@ -439,22 +558,24 @@ def ocr_headers(img, col_intervals, header_row):
         if cell is None:
             return idx, ""
         
+        # Use PSM 6 (uniform block of text) instead of PSM 7 (single line)
+        # This helps capture multi-line headers like "36\n36-B"
         text = clean_question_header(ocr_text_block(
-            cell, psm=7,
+            cell, psm=6,
             whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"
         ))
         
-        # Opcional: manter o debug visual
-        vis = cell.copy()
-        cv2.putText(vis, text, (5, min(20, vis.shape[0]-5)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
-        save_debug(f"header_col_{idx+1}.png", vis)
-        
+        if ENABLE_DEBUG_IMAGES:
+            vis = cell.copy()
+            cv2.putText(vis, text, (5, min(20, vis.shape[0]-5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            save_debug(f"header_col_{idx+1}.png", vis)
+
         return idx, text
 
     # Executa o OCR em paralelo
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(_process_header, idx, x1, x2) 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as executor:
+        futures = [executor.submit(_process_header, idx, x1, x2)
                    for idx, (x1, x2) in enumerate(col_intervals)]
         
         for future in concurrent.futures.as_completed(futures):
@@ -479,16 +600,16 @@ def ocr_names(img, name_col, candidate_rows):
         if re.search(r"\bTOTAL\b", text.upper()):
             text = "__TOTAL__"
             
-        # Opcional: manter o debug visual
-        vis = cell.copy()
-        cv2.putText(vis, (text or "(vazio)")[:40], (5, min(20, vis.shape[0]-5)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-        save_debug(f"name_row_{idx+1}.png", vis)
-        
+        if ENABLE_DEBUG_IMAGES:
+            vis = cell.copy()
+            cv2.putText(vis, (text or "(vazio)")[:40], (5, min(20, vis.shape[0]-5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
+            save_debug(f"name_row_{idx+1}.png", vis)
+
         return idx, text
 
     # Executa o OCR em paralelo
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as executor:
         futures = [executor.submit(_process_name, i, y1, y2) 
                    for i, (y1, y2) in enumerate(candidate_rows)]
         
@@ -637,31 +758,45 @@ def detect_filled_option_v4(cell: np.ndarray,
         return CellResult(label=None, confidence=1.0, density=max_density,
                           fill_detected=False)
 
-    vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    cv2.line(vis, (x_center, 0), (x_center, H-1), (255, 0, 0), 1)
+    vis = None
+    if debug_name and ENABLE_DEBUG_IMAGES:
+        vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        cv2.line(vis, (x_center, 0), (x_center, H-1), (255, 0, 0), 1)
 
     band_results = []
     for i in range(4):
         y1 = band_edges[i];  y2 = band_edges[i+1]
-        cv2.rectangle(vis, (0, y1), (W-1, y2-1), (220, 220, 220), 1)
+        if vis is not None:
+            cv2.rectangle(vis, (0, y1), (W-1, y2-1), (220, 220, 220), 1)
 
         candidates = component_candidates_in_band(gray, bw, y1, y2, x_center)
         chosen = None;  chosen_score = None
 
         if candidates:
-            scored = [(score_candidate(gray, cx, cy, r)["mean_inner"],
-                       abs(cx - x_center), -area, (cx, cy, r),
-                       score_candidate(gray, cx, cy, r))
-                      for cx, cy, r, area, _ in candidates]
+            scored = []
+            for cx, cy, r, area, _ in candidates:
+                score = score_candidate(gray, cx, cy, r)
+                scored.append((
+                    score["mean_inner"],
+                    abs(cx - x_center),
+                    -area,
+                    (cx, cy, r),
+                    score,
+                ))
             scored.sort(key=lambda t: (t[0], t[1], t[2]))
             _, _, _, chosen, chosen_score = scored[0]
         else:
             circles = fallback_circle_in_band(gray, y1, y2, x_center)
             if circles:
-                scored = [(score_candidate(gray, cx, cy, r)["mean_inner"],
-                           abs(cx - x_center), (cx, cy, r),
-                           score_candidate(gray, cx, cy, r))
-                          for cx, cy, r in circles]
+                scored = []
+                for cx, cy, r in circles:
+                    score = score_candidate(gray, cx, cy, r)
+                    scored.append((
+                        score["mean_inner"],
+                        abs(cx - x_center),
+                        (cx, cy, r),
+                        score,
+                    ))
                 scored.sort(key=lambda t: (t[0], t[1]))
                 _, _, chosen, chosen_score = scored[0]
 
@@ -700,19 +835,21 @@ def detect_filled_option_v4(cell: np.ndarray,
         return CellResult(label=None, confidence=confidence,
                           density=best_density, fill_detected=False)
 
-    for d in band_results:
-        cv2.circle(vis, (d["cx"], d["cy"]), d["r"], (0, 255, 0), 1)
-        cv2.putText(vis, d["label"], (d["cx"]+d["r"]+3, d["cy"]+3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1,
-                    cv2.LINE_AA)
+    if vis is not None:
+        for d in band_results:
+            cv2.circle(vis, (d["cx"], d["cy"]), d["r"], (0, 255, 0), 1)
+            cv2.putText(vis, d["label"], (d["cx"]+d["r"]+3, d["cy"]+3),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1,
+                        cv2.LINE_AA)
 
     chosen_label = band_results[best]["label"]
-    cv2.putText(vis,
-                f"pick={chosen_label} conf={confidence:.2f} d={best_density:.2f}",
-                (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1,
-                cv2.LINE_AA)
+    if vis is not None:
+        cv2.putText(vis,
+                    f"pick={chosen_label} conf={confidence:.2f} d={best_density:.2f}",
+                    (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1,
+                    cv2.LINE_AA)
 
-    if debug_name:
+    if vis is not None:
         save_debug(f"{debug_name}_cell.png", vis)
 
     if diff < MIN_INNER_DIFF:
@@ -778,17 +915,59 @@ def build_final_table(img: np.ndarray):
     question_headers = []
     for idx in question_col_indices:
         h = headers[idx] if idx < len(headers) else ""
-        if not re.fullmatch(r"\d{1,3}(?:-[A-Z])?", h or ""):
+        # Keep the OCR result if it looks like a valid question number
+        # Valid formats: "35-A", "36", "38-C", etc.
+        if not h or not re.search(r"\d", h):
+            # Only use fallback if header is empty or has no digits
             h = f"Q{len(question_headers)+1}"
         question_headers.append(h)
 
-    seen = {}
+    # Pattern-based inference: fix OCR errors by detecting sequences
+    # If we see "36-A" followed by a short/invalid header, infer it should be "36-B"
     final_question_headers = []
-    for h in question_headers:
-        if h not in seen:
-            seen[h] = 1;  final_question_headers.append(h)
-        else:
-            seen[h] += 1; final_question_headers.append(f"{h}_{seen[h]}")
+    for i, h in enumerate(question_headers):
+        # Check for pattern like "38-B" followed by "38" -> should be "38-C"
+        # This must be checked FIRST before the single-digit logic
+        if i > 0 and re.match(r"^\d+$", h):
+            prev = final_question_headers[-1]
+            m = re.match(r"(\d+)-([A-Z])", prev)
+            if m and m.group(1) == h:
+                # Previous was "N-X", current is "N" -> make it "N-Y"
+                next_letter = chr(ord(m.group(2)) + 1)
+                h = f"{h}-{next_letter}"
+                final_question_headers.append(h)
+                continue
+        
+        # Check if this header looks incomplete (single digit or very short)
+        # Only apply if it's REALLY short (1-2 chars) and doesn't look like a valid question number
+        if len(h) <= 2 and h.isdigit() and i > 0:
+            # Look at the previous header to infer the pattern
+            prev = final_question_headers[-1]
+            # Extract base number and letter from previous header
+            m = re.match(r"(\d+)-([A-Z])", prev)
+            if m:
+                base_num = m.group(1)
+                prev_letter = m.group(2)
+                # If current header matches the base number OR just the last digit
+                if h == base_num or h == base_num[-1]:
+                    next_letter = chr(ord(prev_letter) + 1)
+                    h = f"{base_num}-{next_letter}"
+                # Also check if next header (if exists) suggests a pattern
+                # E.g., "36-A", "5", "37" -> "5" should be "36-B"
+                # Only apply if current value is VERY suspicious (single digit, not sequential)
+                elif len(h) == 1 and i + 1 < len(question_headers):
+                    next_h = question_headers[i + 1]
+                    if next_h.isdigit():
+                        next_num = int(next_h)
+                        base_int = int(base_num)
+                        curr_int = int(h)
+                        # Only infer if: next is close to base AND current doesn't fit the sequence
+                        # E.g., 36-A, 5, 37 -> 5 doesn't fit, so make it 36-B
+                        if abs(next_num - base_int) <= 1 and curr_int != base_int + 1:
+                            next_letter = chr(ord(prev_letter) + 1)
+                            h = f"{base_num}-{next_letter}"
+        
+        final_question_headers.append(h)
 
     records, conf_records, density_records = [], [], []
 
@@ -802,8 +981,8 @@ def build_final_table(img: np.ndarray):
             x1, x2 = col_intervals[col_idx]
             q_name  = final_question_headers[q_pos]
             cell    = crop(img, x1, y1, x2, y2, pad=4)
-            result  = detect_filled_option_v4(
-                cell, debug_name=f"row{row_i+1}_{q_name}")
+            debug_name = f"row{row_i+1}_{q_name}" if ENABLE_DEBUG_IMAGES else None
+            result  = detect_filled_option_v4(cell, debug_name=debug_name)
             rec[q_name]   = result.label if result.label is not None else ""
             c_rec[q_name] = round(result.confidence, 3)
             d_rec[q_name] = round(result.density, 3)
@@ -827,6 +1006,163 @@ def build_final_table(img: np.ndarray):
 # ============================================================
 # MAIN com cProfile + relatório por função
 # ============================================================
+
+def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bool:
+    """
+    Processa uma única imagem e salva os resultados.
+    Retorna True se bem-sucedido, False caso contrário.
+    """
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"  ❌ Erro ao abrir imagem: {image_path}")
+            return False
+
+        # Temporariamente sobrescreve DEBUG_DIR para esta imagem
+        global DEBUG_DIR
+        original_debug_dir = DEBUG_DIR
+        DEBUG_DIR = debug_dir
+        Path(DEBUG_DIR).mkdir(parents=True, exist_ok=True)
+
+        pre = preprocess_document(img)
+        df, df_conf, df_density, meta = build_final_table(pre)
+
+        # Salva CSVs
+        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        conf_path = output_csv.replace(".csv", "_confianca.csv")
+        density_path = output_csv.replace(".csv", "_densidade.csv")
+        df_conf.to_csv(conf_path, index=False, encoding="utf-8-sig")
+        df_density.to_csv(density_path, index=False, encoding="utf-8-sig")
+
+        # Restaura DEBUG_DIR
+        DEBUG_DIR = original_debug_dir
+
+        print(f"  ✓ Processado: {Path(image_path).name}")
+        print(f"    - {len(meta['student_names'])} alunos, {len(meta['question_headers_final'])} questões")
+        return True
+
+    except Exception as e:
+        print(f"  ❌ Erro ao processar {image_path}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
+    """
+    Processa todas as imagens em uma pasta.
+    
+    Estrutura de saída:
+    output_dir/
+      ├── image1/
+      │   ├── resultado.csv
+      │   ├── resultado_confianca.csv
+      │   ├── resultado_densidade.csv
+      │   └── debug/
+      ├── image2/
+      │   └── ...
+      └── summary.txt
+    """
+    input_path = Path(input_folder)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Encontra todas as imagens
+    image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif'}
+    image_files = [
+        f for f in input_path.iterdir()
+        if f.is_file() and f.suffix.lower() in image_extensions
+    ]
+
+    if not image_files:
+        print(f"Nenhuma imagem encontrada em: {input_folder}")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"PROCESSAMENTO EM LOTE (PROFILING)")
+    print(f"{'='*60}")
+    print(f"Pasta de entrada: {input_folder}")
+    print(f"Pasta de saída:   {output_dir}")
+    print(f"Total de imagens: {len(image_files)}")
+    print(f"{'='*60}\n")
+
+    results = []
+    successful = 0
+    failed = 0
+    total_time = 0
+
+    for i, image_file in enumerate(image_files, 1):
+        print(f"[{i}/{len(image_files)}] Processando: {image_file.name}")
+        
+        # Cria subpasta para esta imagem
+        image_stem = image_file.stem
+        image_output_dir = output_path / image_stem
+        image_output_dir.mkdir(exist_ok=True)
+        
+        # Define caminhos de saída
+        output_csv = str(image_output_dir / "resultado.csv")
+        debug_dir = str(image_output_dir / "debug")
+        
+        # Processa a imagem com timing
+        start_time = time.perf_counter()
+        success = process_single_image(str(image_file), output_csv, debug_dir)
+        elapsed = time.perf_counter() - start_time
+        total_time += elapsed
+        
+        results.append({
+            'file': image_file.name,
+            'success': success,
+            'time_ms': elapsed * 1000,
+            'output_dir': str(image_output_dir)
+        })
+        
+        if success:
+            successful += 1
+            print(f"    - Tempo: {elapsed*1000:.0f} ms")
+        else:
+            failed += 1
+        print()
+
+    # Gera resumo
+    avg_time = total_time / len(image_files) if image_files else 0
+    print(f"{'='*60}")
+    print(f"RESUMO DO PROCESSAMENTO")
+    print(f"{'='*60}")
+    print(f"Total processado: {len(image_files)}")
+    print(f"Sucesso:          {successful} ({successful/len(image_files)*100:.1f}%)")
+    print(f"Falhas:           {failed} ({failed/len(image_files)*100:.1f}%)")
+    print(f"Tempo total:      {total_time:.2f}s")
+    print(f"Tempo médio:      {avg_time*1000:.0f} ms/imagem")
+    print(f"{'='*60}\n")
+
+    # Salva resumo em arquivo
+    summary_file = output_path / "summary.txt"
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write(f"RESUMO DO PROCESSAMENTO EM LOTE (PROFILING)\n")
+        f.write(f"{'='*60}\n")
+        f.write(f"Data: {pd.Timestamp.now()}\n")
+        f.write(f"Pasta de entrada: {input_folder}\n")
+        f.write(f"Pasta de saída: {output_dir}\n\n")
+        f.write(f"Total processado: {len(image_files)}\n")
+        f.write(f"Sucesso: {successful}\n")
+        f.write(f"Falhas: {failed}\n")
+        f.write(f"Tempo total: {total_time:.2f}s\n")
+        f.write(f"Tempo médio: {avg_time*1000:.0f} ms/imagem\n\n")
+        f.write(f"{'='*60}\n")
+        f.write(f"DETALHES POR IMAGEM\n")
+        f.write(f"{'='*60}\n\n")
+        
+        for result in results:
+            status = "✓ SUCESSO" if result['success'] else "✗ FALHA"
+            f.write(f"{status}: {result['file']}\n")
+            if result['success']:
+                f.write(f"  Tempo: {result['time_ms']:.0f} ms\n")
+            f.write(f"  Saída: {result['output_dir']}\n\n")
+
+    print(f"Resumo salvo em: {summary_file}")
+    print(f"Resultados salvos em: {output_dir}/")
+
 
 def main():
     img = cv2.imread(IMAGE_PATH)
