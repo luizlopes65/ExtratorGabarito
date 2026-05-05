@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import pytesseract
 import re
+import shutil
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
@@ -11,9 +12,9 @@ from typing import List, Tuple, Optional
 # CONFIGURAÇÕES
 # ============================================================
 
-IMAGE_PATH = "examples/image.png"
-OUTPUT_CSV = "resultados/resultado_gabarito_v3.csv"
-DEBUG_DIR = "debug/debug_gabarito_v3"
+IMAGE_PATH = "examples/subtest/digitalizada.jpeg"
+OUTPUT_CSV = "resultados/resultado_gabarito_v4.csv"
+DEBUG_DIR = "debug/debug_gabarito_v4"
 
 TESSERACT_CMD = r"/opt/homebrew/bin/tesseract"
 
@@ -24,27 +25,23 @@ OPTION_LABELS = ["B", "1", "2", "3"]
 MIN_EXPECTED_QUESTION_COLS = 8
 MIN_EXPECTED_STUDENT_ROWS = 3
 
-MAX_ROTATION_CORRECTION_DEGREES = 8
 GRID_CLUSTER_TOLERANCE = 12
-ROW_HEIGHT_MIN = 30  # Reduced to capture shorter header rows
+ROW_HEIGHT_MIN = 20
 COL_WIDTH_MIN = 25
 
 EXPECTED_NUM_QUESTIONS = None
 
-# ============================================================
-# FIX: Limiares para detecção de célula vazia
-# ============================================================
-# Densidade mínima de pixels escuros para considerar que há
-# uma bolinha marcada na faixa (igual ao limiar da abordagem B).
-# Ajuste entre 0.03 e 0.08 conforme a qualidade da impressão.
+
+EXPECTED_QUESTION_HEADERS = []
+
 MIN_FILL_DENSITY = 0.05
-
-# Diferença mínima de mean_inner entre a melhor e a segunda opção.
-# Abaixo disso considera empate → célula em branco.
 MIN_INNER_DIFF = 5
-
-# Razão máxima entre segunda e primeira densidade para marcar dupla.
 MAX_SECOND_RATIO = 0.65
+
+
+NARROW_COL_RATIO = 0.40   # drop if width < median_width * this
+
+WIDE_NAME_COL_RATIO = 1.5  # name col width >= median * this (informational)
 
 # ============================================================
 # ESTRUTURAS
@@ -61,10 +58,10 @@ class OCRBox:
 
 @dataclass
 class CellResult:
-    label: Optional[str]       # None = em branco
+    label: Optional[str]
     confidence: float
-    density: float             # NOVO: densidade da opção escolhida (0.0–1.0)
-    fill_detected: bool        # NOVO: True se densidade passou do limiar
+    density: float
+    fill_detected: bool
 
 # ============================================================
 # INICIALIZAÇÃO
@@ -81,6 +78,12 @@ Path(DEBUG_DIR).mkdir(exist_ok=True)
 
 def save_debug(name: str, img: np.ndarray):
     cv2.imwrite(str(Path(DEBUG_DIR) / name), img)
+
+def clear_debug_dir(debug_dir: str):
+    debug_path = Path(debug_dir)
+    if debug_path.exists():
+        shutil.rmtree(debug_path)
+    debug_path.mkdir(parents=True, exist_ok=True)
 
 def to_gray(img: np.ndarray) -> np.ndarray:
     if len(img.shape) == 2:
@@ -122,20 +125,6 @@ def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
     M = cv2.getPerspectiveTransform(rect, dst)
     return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
-def rotate_image(image: np.ndarray, angle: float, bg=255) -> np.ndarray:
-    h, w = image.shape[:2]
-    center = (w // 2, h // 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    cos = abs(M[0, 0])
-    sin = abs(M[0, 1])
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-    M[0, 2] += (new_w / 2) - center[0]
-    M[1, 2] += (new_h / 2) - center[1]
-    if len(image.shape) == 2:
-        return cv2.warpAffine(image, M, (new_w, new_h), borderValue=bg)
-    return cv2.warpAffine(image, M, (new_w, new_h), borderValue=(bg, bg, bg))
-
 def cluster_positions(values: List[int], tolerance: int = 10) -> List[int]:
     if not values:
         return []
@@ -149,13 +138,16 @@ def cluster_positions(values: List[int], tolerance: int = 10) -> List[int]:
     return [int(round(np.mean(g))) for g in groups]
 
 def crop(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, pad: int = 0) -> Optional[np.ndarray]:
-    x1 = max(0, x1 + pad)
-    y1 = max(0, y1 + pad)
-    x2 = min(img.shape[1], x2 - pad)
-    y2 = min(img.shape[0], y2 - pad)
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return img[y1:y2, x1:x2].copy()
+    """Crop with padding, gracefully reducing pad if the cell is too small."""
+    while pad >= 0:
+        cx1 = max(0, x1 + pad)
+        cy1 = max(0, y1 + pad)
+        cx2 = min(img.shape[1], x2 - pad)
+        cy2 = min(img.shape[0], y2 - pad)
+        if cx2 > cx1 and cy2 > cy1:
+            return img[cy1:cy2, cx1:cx2].copy()
+        pad -= 1
+    return None
 
 # ============================================================
 # PRÉ-PROCESSAMENTO GEOMÉTRICO
@@ -177,114 +169,11 @@ def find_document_contour(gray: np.ndarray) -> Optional[np.ndarray]:
             return approx.reshape(4, 2)
     return None
 
-def detect_orientation(gray: np.ndarray) -> int:
-    """
-    Detecta a orientação do documento e retorna o ângulo de rotação necessário.
-    Retorna: 0, 90, 180, ou 270 graus (sentido anti-horário).
-    
-    Usa análise de texto OCR para determinar a orientação correta.
-    """
-    # Testa as 4 orientações possíveis
-    orientations = [0, 90, 180, 270]
-    best_score = -1
-    best_orientation = 0
-    
-    for angle in orientations:
-        # Rotaciona a imagem
-        if angle == 0:
-            test_img = gray
-        elif angle == 90:
-            test_img = cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        elif angle == 180:
-            test_img = cv2.rotate(gray, cv2.ROTATE_180)
-        else:  # 270
-            test_img = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
-        
-        # Tenta OCR em uma região central (onde geralmente há texto)
-        h, w = test_img.shape
-        roi = test_img[h//4:3*h//4, w//4:3*w//4]
-        
-        try:
-            # Usa OSD (Orientation and Script Detection) do Tesseract
-            osd = pytesseract.image_to_osd(roi)
-            # Extrai o confidence score
-            conf_match = re.search(r'Orientation confidence: ([\d.]+)', osd)
-            if conf_match:
-                confidence = float(conf_match.group(1))
-                if confidence > best_score:
-                    best_score = confidence
-                    best_orientation = angle
-        except Exception:
-            # Se OSD falhar, tenta OCR normal e conta caracteres alfanuméricos
-            try:
-                text = pytesseract.image_to_string(roi, lang=OCR_LANG)
-                # Score baseado em caracteres alfanuméricos válidos
-                alnum_count = sum(c.isalnum() for c in text)
-                score = alnum_count / max(len(text), 1) * 100
-                if score > best_score:
-                    best_score = score
-                    best_orientation = angle
-            except Exception:
-                continue
-    
-    return best_orientation
-
-def estimate_skew_angle(gray: np.ndarray) -> float:
-    """
-    Estima o ângulo de inclinação (skew) do documento.
-    Apenas para correções pequenas (±MAX_ROTATION_CORRECTION_DEGREES).
-    """
-    bw = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 31, 12
-    )
-    lines = cv2.HoughLinesP(
-        bw, rho=1, theta=np.pi / 180, threshold=150,
-        minLineLength=max(60, gray.shape[1] // 8), maxLineGap=20
-    )
-    if lines is None:
-        return 0.0
-    angles = []
-    for line in lines[:, 0]:
-        x1, y1, x2, y2 = line
-        dx = x2 - x1
-        dy = y2 - y1
-        angle = 90.0 if dx == 0 else np.degrees(np.arctan2(dy, dx))
-        if abs(angle) <= MAX_ROTATION_CORRECTION_DEGREES:
-            angles.append(angle)
-        elif abs(abs(angle) - 90) <= MAX_ROTATION_CORRECTION_DEGREES:
-            angles.append(angle - 90 if angle > 0 else angle + 90)
-    return float(np.median(angles)) if angles else 0.0
-
 def preprocess_document(img: np.ndarray) -> np.ndarray:
-    original = img.copy()
     gray = to_gray(img)
-    
-    # PASSO 1: Detectar e corrigir orientação principal (0°, 90°, 180°, 270°)
-    orientation = detect_orientation(gray)
-    if orientation != 0:
-        print(f"Detectada rotação de {orientation}° - corrigindo orientação...")
-        if orientation == 90:
-            img = cv2.rotate(original, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        elif orientation == 180:
-            img = cv2.rotate(original, cv2.ROTATE_180)
-        elif orientation == 270:
-            img = cv2.rotate(original, cv2.ROTATE_90_CLOCKWISE)
-        gray = to_gray(img)
-        save_debug("00_orientation_corrected.png", img)
-    
-    # PASSO 2: Detectar contorno do documento e aplicar transformação de perspectiva
     doc = find_document_contour(gray)
     if doc is not None:
         img = four_point_transform(img, doc)
-    
-    # PASSO 3: Corrigir inclinação fina (skew) - apenas pequenos ângulos
-    gray2 = to_gray(img)
-    angle = estimate_skew_angle(gray2)
-    if abs(angle) > 0.15:
-        print(f"Corrigindo inclinação de {angle:.2f}°...")
-        img = rotate_image(img, angle * -1)
-    
     save_debug("01_preprocessed.png", img)
     return img
 
@@ -319,6 +208,125 @@ def extract_line_positions(line_img: np.ndarray, axis: str) -> List[int]:
                 coords.append(y + h // 2)
     return cluster_positions(coords, tolerance=GRID_CLUSTER_TOLERANCE)
 
+
+# ============================================================
+# FIX 1: Filter spurious margin columns
+# ============================================================
+
+def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int) -> List[Tuple[int, int]]:
+    """
+    Remove columns that are artifacts of vertical margin text (URL, watermark, etc.).
+
+    Strategy:
+    1. Compute the median column width among all intervals.
+    2. Drop any column narrower than NARROW_COL_RATIO * median_width.
+    3. Also drop columns whose centre is in the outermost 4% of the image width,
+       which is where rotated margin text typically lives.
+    """
+    if not col_intervals:
+        return col_intervals
+
+    widths = [x2 - x1 for x1, x2 in col_intervals]
+    median_w = float(np.median(widths))
+    min_w = NARROW_COL_RATIO * median_w
+
+    margin_px = int(img_width * 0.03)  # outermost 3% on each side (reduced from 7% to avoid filtering valid columns)
+
+    filtered = []
+    for x1, x2 in col_intervals:
+        w = x2 - x1
+        cx = (x1 + x2) / 2
+        if w < min_w:
+            print(f"  [filter_cols] Dropping narrow column x={x1}-{x2} (w={w:.0f} < {min_w:.0f})")
+            continue
+        if cx < margin_px or cx > img_width - margin_px:
+            print(f"  [filter_cols] Dropping margin column x={x1}-{x2} (cx={cx:.0f})")
+            continue
+        filtered.append((x1, x2))
+
+    if not filtered:
+        print("  [filter_cols] WARNING: all columns were filtered — reverting to original")
+        return col_intervals
+
+    return filtered
+
+
+# ============================================================
+# FIX 2: Robust header-row identification
+# ============================================================
+
+def identify_header_and_student_rows(img, row_intervals):
+    """
+    Identify the header row (question numbers) and student rows.
+
+    Improved logic vs original:
+    - The header row is the row whose OCR content matches question-number
+      patterns (digits / digits-letter) across most columns.
+    - Fallback: shortest row among the first few candidates — but now we
+      look up to the first 5 rows (not 3), because Image 1 has:
+        row0 = very tall QR block
+        row1 = header (short, has "Nome do Aluno / 1 / 2 / 3 …")
+        row2+ = students (taller)
+      The original code could misidentify row1 if the QR block was split.
+    - Student rows: all rows after the header that pass the height test.
+    """
+    if not row_intervals:
+        return None, []
+    if len(row_intervals) < 2:
+        return row_intervals[0], []
+
+    heights = [y2 - y1 for y1, y2 in row_intervals]
+    median_h = float(np.median(heights))
+
+    # ---------- try OCR-based detection first ----------
+    # Quick OCR of first column of each candidate row to find "Nome do Aluno"
+    gray = to_gray(img)
+    img_w = img.shape[1]
+    # Use roughly the left 30% of the image as the name-column region for scanning
+    scan_x2 = int(img_w * 0.30)
+
+    header_row_idx = None
+    for i, (y1, y2) in enumerate(row_intervals[:6]):
+        cell = crop(gray, 0, y1, scan_x2, y2, pad=2)
+        if cell is None:
+            continue
+        try:
+            txt = pytesseract.image_to_string(
+                cell, lang=OCR_LANG,
+                config="--oem 3 --psm 6"
+            ).upper()
+        except Exception:
+            txt = ""
+        if re.search(r"NOME", txt):
+            header_row_idx = i
+            print(f"  [header] Found 'Nome' in row {i} via OCR → header_row_idx={i}")
+            break
+
+    # ---------- fallback: shortest row among first N candidates ----------
+    if header_row_idx is None:
+        n_candidates = min(5, len(row_intervals))
+        candidates = [(y2 - y1, i) for i, (y1, y2) in enumerate(row_intervals[:n_candidates])]
+        candidates.sort()
+        header_row_idx = candidates[0][1]
+        print(f"  [header] OCR fallback: shortest row among first {n_candidates} → idx={header_row_idx}")
+
+    header_row = row_intervals[header_row_idx]
+
+    # Student rows: everything after the header that is tall enough
+    min_student_h = max(40, median_h * 0.60)
+    student_rows = []
+    for iv in row_intervals[header_row_idx + 1:]:
+        h = iv[1] - iv[0]
+        if h >= min_student_h:
+            student_rows.append(iv)
+
+    return header_row, student_rows
+
+
+# ============================================================
+# Main grid structure (uses both fixes)
+# ============================================================
+
 def get_table_structure(img: np.ndarray):
     gray = to_gray(img)
     bw = binarize_for_grid(gray)
@@ -326,16 +334,30 @@ def get_table_structure(img: np.ndarray):
     save_debug("02_grid_bw.png", bw)
     save_debug("03_vertical.png", vertical)
     save_debug("04_horizontal.png", horizontal)
+
     xs = cluster_positions(extract_line_positions(vertical, "vertical"), tolerance=GRID_CLUSTER_TOLERANCE)
     ys = cluster_positions(extract_line_positions(horizontal, "horizontal"), tolerance=GRID_CLUSTER_TOLERANCE)
-    col_intervals = [(xs[i], xs[i+1]) for i in range(len(xs)-1) if xs[i+1]-xs[i] >= COL_WIDTH_MIN]
+
+    raw_col_intervals = [(xs[i], xs[i+1]) for i in range(len(xs)-1) if xs[i+1]-xs[i] >= COL_WIDTH_MIN]
+
+    # ── FIX 1: remove margin/artifact columns ──
+    col_intervals = filter_margin_columns(raw_col_intervals, img.shape[1])
+
+    all_row_heights = [(ys[i], ys[i+1], ys[i+1]-ys[i]) for i in range(len(ys)-1)]
+    print(f"\nAll detected row positions (y1, y2, height):")
+    for y1, y2, h in all_row_heights:
+        status = "✓ KEPT" if h >= ROW_HEIGHT_MIN else f"✗ FILTERED (< {ROW_HEIGHT_MIN}px)"
+        print(f"  Row {y1:4d}-{y2:4d}: {h:3d}px {status}")
+
     row_intervals = [(ys[i], ys[i+1]) for i in range(len(ys)-1) if ys[i+1]-ys[i] >= ROW_HEIGHT_MIN]
+
     dbg = img.copy()
     for x in xs:
         cv2.line(dbg, (x, 0), (x, dbg.shape[0]-1), (0, 0, 255), 1)
     for y in ys:
         cv2.line(dbg, (0, y), (dbg.shape[1]-1, y), (255, 0, 0), 1)
     save_debug("05_detected_grid_lines.png", dbg)
+
     return xs, ys, col_intervals, row_intervals
 
 # ============================================================
@@ -366,102 +388,178 @@ def run_ocr_boxes(img: np.ndarray, psm: int = 6, whitelist: Optional[str] = None
 
 def ocr_text_block(img: np.ndarray, psm: int = 6, whitelist: Optional[str] = None) -> str:
     gray = to_gray(img)
-    
-    # Try with adaptive thresholding first
     proc = cv2.GaussianBlur(gray, (3, 3), 0)
     proc = cv2.adaptiveThreshold(proc, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10)
     config = f"--oem 3 --psm {psm}"
     if whitelist:
         config += f' -c tessedit_char_whitelist="{whitelist}"'
-    
     result = normalize_whitespace(pytesseract.image_to_string(proc, lang=OCR_LANG, config=config))
-    
-    # If result is too short or doesn't contain expected patterns, try without preprocessing
     if len(result) < 2 or not re.search(r"\d", result):
         result_raw = normalize_whitespace(pytesseract.image_to_string(gray, lang=OCR_LANG, config=config))
         if len(result_raw) > len(result):
             result = result_raw
-    
     return result
 
-def clean_question_header(text: str) -> str:
-    """
-    Extract question number from OCR text.
-    Handles formats like: 35-A, 35-B, 36-A, 37, 38-C, etc.
-    
-    When OCR returns text like "36 36-B", we want to extract "36-B" (the rightmost complete pattern).
-    """
-    text = text.upper().replace(" ", "")
-    # Normalize different dash characters to standard hyphen
+def normalize_question_token(text: str) -> str:
+    text = (text or "").upper().strip()
     text = text.replace("_", "-").replace(".", "-").replace("—", "-").replace("–", "-")
-    
-    # Find ALL matches of question number patterns (e.g., 35-A, 36-B, 37)
-    # Pattern: 1-3 digits, optionally followed by hyphen and letter
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"(\d+)([A-Z])$", r"\1-\2", text)
+    return text
+
+def extract_question_number_and_suffix(text: str) -> Tuple[Optional[int], Optional[str]]:
+    token = normalize_question_token(text)
+    m = re.fullmatch(r"(\d{1,3})(?:-([A-Z]))?", token)
+    if not m:
+        return None, None
+    return int(m.group(1)), m.group(2)
+
+def clean_question_header(text: str) -> str:
+    text = normalize_question_token(text)
+
     matches = re.findall(r"\d{1,3}(?:-[A-Z])?", text)
-    
     if not matches:
-        # If no match, return cleaned text as-is for debugging
-        return text
-    
-    # If multiple matches found (e.g., ["36", "36-B"]), prefer the one with a letter suffix
-    # This handles cases where OCR captures both "36" and "36-B" in the same cell
+        text2 = text.replace("G", "6").replace("O", "0").replace("I", "1").replace("S", "5")
+        text2 = re.sub(r"(\d+)([A-Z])$", r"\1-\2", text2)
+        matches = re.findall(r"\d{1,3}(?:-[A-Z])?", text2)
+        if not matches:
+            return text
+
     matches_with_suffix = [m for m in matches if "-" in m]
     if matches_with_suffix:
-        # Return the last (rightmost) match with a suffix
         return matches_with_suffix[-1]
-    
-    # Otherwise, return the last match
-    return matches[-1]
+
+    result = matches[-1]
+    if len(result) == 2 and result[0] == result[1]:
+        result = result[0]
+    return result
 
 def clean_name(text: str) -> str:
     text = normalize_whitespace(text)
     text = re.sub(r"[^A-Za-zÀ-ÿ0-9\s\-']", "", text)
     return normalize_whitespace(text)
 
+def question_header_similarity_score(observed: str, expected: str) -> int:
+    observed = normalize_question_token(observed)
+    expected = normalize_question_token(expected)
+
+    if observed == expected:
+        return 0
+
+    obs_num, obs_suffix = extract_question_number_and_suffix(observed)
+    exp_num, exp_suffix = extract_question_number_and_suffix(expected)
+
+    score = 0
+
+    if obs_num is None:
+        score += 100
+    else:
+        score += abs(obs_num - exp_num) * 10
+
+    if obs_suffix != exp_suffix:
+        if obs_suffix is None or exp_suffix is None:
+            score += 8
+        else:
+            score += abs(ord(obs_suffix) - ord(exp_suffix)) + 3
+
+    obs_digits = "".join(re.findall(r"\d", observed))
+    exp_digits = "".join(re.findall(r"\d", expected))
+    if obs_digits and exp_digits and obs_digits != exp_digits:
+        score += 12
+
+    if "-" in observed and "-" not in expected:
+        score += 2
+    if "-" not in observed and "-" in expected:
+        score += 4
+
+    if observed and expected and observed[0] != expected[0]:
+        score += 1
+
+    return score
+
+def reconcile_question_headers(question_headers: List[str],
+                               expected_headers: Optional[List[str]] = None) -> List[str]:
+    """
+    Reconcilia cabeçalhos OCR com uma lista canônica opcional.
+
+    Regras:
+    - Se expected_headers estiver vazia, mantém o comportamento atual.
+    - Se expected_headers existir e tiver tamanho compatível, usa alinhamento por posição
+      para substituir/corrigir cabeçalhos OCR ruins.
+    - Se o OCR estiver claramente bom, preserva o valor OCR.
+    - Se estiver ruim/ausente, usa o valor esperado da mesma coluna.
+    """
+    final_headers = []
+
+    if expected_headers:
+        normalized_expected = [normalize_question_token(h) for h in expected_headers if normalize_question_token(h)]
+        if len(normalized_expected) >= len(question_headers):
+            for i, observed in enumerate(question_headers):
+                expected = normalized_expected[i]
+                observed_norm = normalize_question_token(observed)
+
+                if not observed_norm:
+                    final_headers.append(expected)
+                    continue
+
+                if not re.search(r"\d", observed_norm):
+                    final_headers.append(expected)
+                    continue
+
+                score = question_header_similarity_score(observed_norm, expected)
+
+                # Preserve OCR only when it is reasonably close to the expected token.
+                if score <= 8:
+                    final_headers.append(observed_norm)
+                else:
+                    final_headers.append(expected)
+            return final_headers
+
+    # Fallback atual: inferência baseada no padrão anterior
+    for i, h in enumerate(question_headers):
+        h = normalize_question_token(h)
+
+        if i > 0 and re.match(r"^\d+$", h):
+            prev = final_headers[-1]
+            m = re.match(r"(\d+)-([A-Z])", prev)
+            if m and m.group(1) == h:
+                next_letter = chr(ord(m.group(2)) + 1)
+                h = f"{h}-{next_letter}"
+                final_headers.append(h)
+                continue
+
+        if len(h) <= 2 and h.isdigit() and i > 0:
+            prev = final_headers[-1]
+            m = re.match(r"(\d+)-([A-Z])", prev)
+            if m:
+                base_num = m.group(1)
+                prev_letter = m.group(2)
+                if h == base_num or h == base_num[-1]:
+                    next_letter = chr(ord(prev_letter) + 1)
+                    h = f"{base_num}-{next_letter}"
+                elif len(h) == 1 and i + 1 < len(question_headers):
+                    next_h = normalize_question_token(question_headers[i + 1])
+                    if next_h.isdigit():
+                        next_num = int(next_h)
+                        base_int = int(base_num)
+                        curr_int = int(h)
+                        if abs(next_num - base_int) <= 1 and curr_int != base_int + 1:
+                            next_letter = chr(ord(prev_letter) + 1)
+                            h = f"{base_num}-{next_letter}"
+
+        final_headers.append(h)
+
+    return final_headers
+
 # ============================================================
 # IDENTIFICAÇÃO DE REGIÕES
 # ============================================================
 
-def identify_header_and_student_rows(img, row_intervals):
-    """
-    Identify which row is the header (with question numbers) and which are student rows.
-    The header row is typically the first row and is usually shorter than student rows.
-    """
-    if not row_intervals:
-        return None, []
-    
-    if len(row_intervals) < 2:
-        return row_intervals[0] if row_intervals else None, []
-    
-    heights = [y2 - y1 for y1, y2 in row_intervals]
-    median_h = np.median(heights)
-    
-    # The header row is typically the FIRST row (smallest y-coordinate)
-    # and is usually shorter than student rows
-    header_row = row_intervals[0]
-    
-    # Student rows are all rows after the header that are tall enough
-    # Skip the first row (header) and possibly second row (TOTAL)
-    student_rows = []
-    for i, iv in enumerate(row_intervals[1:], start=1):
-        h = iv[1] - iv[0]
-        if h >= max(55, median_h * 0.75):
-            student_rows.append(iv)
-    
-    return header_row, student_rows
-
-def ocr_headers(img, col_intervals, header_row):
+def ocr_headers(img, col_intervals, header_row, expected_headers: Optional[List[str]] = None):
     y1, y2 = header_row
     headers = []
     for idx, (x1, x2) in enumerate(col_intervals):
-        # Keep original padding of 3 (padding shrinks the cell to avoid grid lines)
         cell = crop(img, x1, y1, x2, y2, pad=3)
-        if cell is None:
-            headers.append("")
-            continue
-        
-        # Use PSM 6 (uniform block of text) instead of PSM 7 (single line)
-        # This helps capture multi-line headers like "36\n36-B"
         text = clean_question_header(ocr_text_block(
             cell, psm=6,
             whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"
@@ -492,7 +590,9 @@ def ocr_names(img, name_col, candidate_rows):
         save_debug(f"name_row_{i+1}.png", vis)
     return names
 
-#_________________________________
+# ============================================================
+# DETECÇÃO DE MARCAÇÃO (unchanged from v3/v4)
+# ============================================================
 
 def preprocess_cell(cell: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(to_gray(cell), (5, 5), 0)
@@ -506,23 +606,14 @@ def binarize_cell(gray: np.ndarray) -> np.ndarray:
     return cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
 
 def measure_band_density(bw: np.ndarray, y1: int, y2: int, x_margin: int = 4) -> float:
-    """
-    FIX: Mede a densidade de pixels escuros em uma faixa da célula binarizada.
-    Ignora as margens laterais (bordas da tabela) e a margem vertical (linhas).
-    Retorna valor entre 0.0 e 1.0.
-    """
     h = y2 - y1
     if h <= 0:
         return 0.0
-
-    # margem vertical: ignora 2px no topo e fim da faixa (linhas da grade)
     y_inner_start = y1 + 2
     y_inner_end   = y2 - 2
-
     band = bw[y_inner_start:y_inner_end, x_margin:-x_margin]
     if band.size == 0:
         return 0.0
-
     return float(cv2.countNonZero(band)) / band.size
 
 def estimate_bubble_x(gray: np.ndarray, bw: np.ndarray) -> int:
@@ -597,19 +688,13 @@ def fallback_circle_in_band(gray, y1, y2, x_center):
     return candidates
 
 def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) -> CellResult:
-    """
-    Versão corrigida: adiciona pré-filtro de densidade antes de decidir pela opção.
-
-    Mudanças em relação à v3:
-    1. `measure_band_density` calcula a fração de pixels escuros em cada faixa,
-       ignorando as bordas da grade (margens de 2px vertical e 4px horizontal).
-    2. Se NENHUMA faixa atingir MIN_FILL_DENSITY → retorna label=None imediatamente
-       sem executar o pipeline de intensidade (célula em branco).
-    3. A melhor opção só é aceita se SUA faixa também passar de MIN_FILL_DENSITY,
-       evitando falsos positivos causados por artefatos de impressão ou bordas de grade.
-    4. O diff mínimo (MIN_INNER_DIFF) é mantido como segunda guarda.
-    """
     if cell is None or cell.size == 0:
+        if debug_name:
+            placeholder = np.zeros((40, 60, 3), dtype=np.uint8)
+            placeholder[:] = (0, 0, 180)
+            cv2.putText(placeholder, "EMPTY", (2, 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            save_debug(f"{debug_name}_cell.png", placeholder)
         return CellResult(label=None, confidence=0.0, density=0.0, fill_detected=False)
 
     gray = preprocess_cell(cell)
@@ -619,9 +704,6 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
     x_center   = estimate_bubble_x(gray, bw)
     band_edges = np.linspace(0, H, 5).astype(int)
 
-    # ----------------------------------------------------------
-    # FIX 1: pré-filtro de densidade por faixa
-    # ----------------------------------------------------------
     densities = []
     for i in range(4):
         d = measure_band_density(bw, band_edges[i], band_edges[i+1], x_margin=4)
@@ -629,8 +711,6 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
 
     max_density = max(densities)
 
-    
-    # Se nenhuma faixa tem pixels suficientes, célula está em branco
     if max_density < MIN_FILL_DENSITY:
         if debug_name:
             vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
@@ -639,9 +719,6 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
             save_debug(f"{debug_name}_cell.png", vis)
         return CellResult(label=None, confidence=1.0, density=max_density, fill_detected=False)
 
-    # ----------------------------------------------------------
-    # Pipeline de intensidade (igual à v3)
-    # ----------------------------------------------------------
     vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     cv2.line(vis, (x_center, 0), (x_center, H-1), (255, 0, 0), 1)
 
@@ -688,9 +765,19 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
 
     band_results.sort(key=lambda d: d["cy"])
     means = [d["mean_inner"] for d in band_results]
-    if min(means) > np.mean(means)/2:
+    # Check if all bubbles have similar intensity (no clear winner)
+    # Changed from avg/2 to avg*0.7 to be more lenient
+    if min(means) > np.mean(means) * 0.8:
+        if debug_name:
+            for d in band_results:
+                cv2.circle(vis, (d["cx"], d["cy"]), d["r"], (0, 255, 0), 1)
+                cv2.putText(vis, d["label"], (d["cx"]+d["r"]+3, d["cy"]+3),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
+            cv2.putText(vis, f"NO CLEAR WINNER means={[round(m,1) for m in means]}", (5, H-8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 128, 255), 1, cv2.LINE_AA)
+            save_debug(f"{debug_name}_cell.png", vis)
         return CellResult(label=None, confidence=0,
-                          density=0, fill_detected=False)
+                          density=max_density, fill_detected=False)
     order = np.argsort(means)
 
     best   = int(order[0])
@@ -698,13 +785,8 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
     diff   = float(means[second] - means[best])
     confidence = max(0.0, min(1.0, diff / 50.0))
 
-    # ----------------------------------------------------------
-    # FIX 2: a faixa escolhida precisa passar no limiar de densidade
-    # ----------------------------------------------------------
     best_density = band_results[best]["density"]
     if best_density < MIN_FILL_DENSITY:
-        # A faixa com menor intensidade não tem pixels suficientes;
-        # provavelmente é artefato de borda de grade → célula em branco
         if debug_name:
             cv2.putText(vis, f"BRANCO-artefato d={best_density:.3f}", (5, H-8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 128, 255), 1, cv2.LINE_AA)
@@ -712,9 +794,6 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
         return CellResult(label=None, confidence=confidence,
                           density=best_density, fill_detected=False)
 
-    # ----------------------------------------------------------
-    # FIX 3: diff mínimo (guarda original mantida)
-    # ----------------------------------------------------------
     for d in band_results:
         cv2.circle(vis, (d["cx"], d["cy"]), d["r"], (0, 255, 0), 1)
         cv2.putText(vis, d["label"], (d["cx"]+d["r"]+3, d["cy"]+3),
@@ -735,14 +814,53 @@ def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) 
                       density=best_density, fill_detected=True)
 
 # ============================================================
-# PIPELINE PRINCIPAL (idêntico ao original, usa v4)
+# PIPELINE PRINCIPAL
 # ============================================================
 
+def find_name_col_idx(col_intervals: List[Tuple[int, int]]) -> int:
+    """
+    The name column is always the widest column in the table.
+    It sits to the left of all the bubble columns, which are narrow and uniform.
+
+    Strategy:
+    1. Find the widest column overall.
+    2. As a sanity check, prefer a column in the left half of the image.
+       If the widest column is on the right (e.g. a spurious right-margin col
+       that slipped through), fall back to the widest column in the left half.
+    """
+    if not col_intervals:
+        return 0
+
+    widths = [(x2 - x1, i) for i, (x1, x2) in enumerate(col_intervals)]
+    img_cx = (col_intervals[0][0] + col_intervals[-1][1]) / 2  # rough image centre
+
+    # widest in left half
+    left_cols = [(w, i) for w, i in widths if (col_intervals[i][0] + col_intervals[i][1]) / 2 < img_cx]
+    if left_cols:
+        best = max(left_cols, key=lambda t: t[0])
+        print(f"  [name_col] Widest left-half column → idx={best[1]} "
+              f"x={col_intervals[best[1]]} w={best[0]}")
+        return best[1]
+
+    # fallback: globally widest
+    best = max(widths, key=lambda t: t[0])
+    print(f"  [name_col] Widest overall column → idx={best[1]} "
+          f"x={col_intervals[best[1]]} w={best[0]}")
+    return best[1]
+
+
 def choose_question_columns(headers, col_intervals):
-    question_cols = [i for i, h in enumerate(headers) if re.fullmatch(r"\d{1,3}(?:-[A-Z])?", h)]
-    if not question_cols and len(col_intervals) >= 2:
-        question_cols = list(range(1, len(col_intervals)))
-    return 0, question_cols
+    # name column is the widest; question columns are everything else that
+    # OCR identified as a question number pattern
+    name_col_idx = find_name_col_idx(col_intervals)
+    question_cols = [
+        i for i, h in enumerate(headers)
+        if i != name_col_idx and re.fullmatch(r"\d{1,3}(?:-[A-Z])?", h)
+    ]
+    if not question_cols:
+        # fallback: all columns except the name column
+        question_cols = [i for i in range(len(col_intervals)) if i != name_col_idx]
+    return name_col_idx, question_cols
 
 def build_final_table(img: np.ndarray):
     xs, ys, col_intervals, row_intervals = get_table_structure(img)
@@ -752,25 +870,78 @@ def build_final_table(img: np.ndarray):
     if len(row_intervals) < 2:
         raise RuntimeError("Não foi possível detectar linhas suficientes.")
 
+    # ── FIX 2: robust header detection ──
     header_row, candidate_student_rows = identify_header_and_student_rows(img, row_intervals)
     if header_row is None:
         raise RuntimeError("Não foi possível identificar a linha de cabeçalho.")
 
-    headers = ocr_headers(img, col_intervals, header_row)
+    headers = ocr_headers(img, col_intervals, header_row, EXPECTED_QUESTION_HEADERS)
     name_col_idx, question_col_indices = choose_question_columns(headers, col_intervals)
+
+    if not EXPECTED_QUESTION_HEADERS:
+        all_non_name_cols = [i for i in range(len(col_intervals)) if i != name_col_idx]
+        if len(question_col_indices) < len(all_non_name_cols):
+            print(f"  [headers] Preserving invalid-OCR columns: using all {len(all_non_name_cols)} non-name columns")
+            question_col_indices = all_non_name_cols
+
+    # Only filter columns that are clearly BEFORE the name column
+    # Don't filter columns after the name column yet - we need all question columns
+    if col_intervals:
+        name_x1 = col_intervals[name_col_idx][0]
+
+        valid_cols = []
+        for i, (x1, x2) in enumerate(col_intervals):
+            if x2 <= name_x1:
+                print(f"  [Fix3] Dropping pre-name column idx={i} x=({x1},{x2})")
+                continue
+            valid_cols.append((x1, x2))
+
+        if len(valid_cols) >= 2 and len(valid_cols) < len(col_intervals):
+            # Rebuild indices to match the pruned col_intervals
+            old_to_new = {}
+            new_i = 0
+            for old_i, col in enumerate(col_intervals):
+                if col in valid_cols:
+                    old_to_new[old_i] = new_i
+                    new_i += 1
+            col_intervals = valid_cols
+            name_col_idx  = old_to_new.get(name_col_idx, 0)
+            question_col_indices = [
+                old_to_new[i] for i in question_col_indices if i in old_to_new
+            ]
+            # Re-run header OCR on the pruned column set
+            headers = ocr_headers(img, col_intervals, header_row, EXPECTED_QUESTION_HEADERS)
+            # Re-derive question columns from fresh headers
+            name_col_idx, question_col_indices = choose_question_columns(headers, col_intervals)
+            if not EXPECTED_QUESTION_HEADERS:
+                all_non_name_cols = [i for i in range(len(col_intervals)) if i != name_col_idx]
+                if len(question_col_indices) < len(all_non_name_cols):
+                    print(f"  [headers] Preserving invalid-OCR columns after pruning: using all {len(all_non_name_cols)} non-name columns")
+                    question_col_indices = all_non_name_cols
+            print(f"  [Fix3] col_intervals pruned to {len(col_intervals)} columns")
 
     if EXPECTED_NUM_QUESTIONS is not None:
         question_col_indices = question_col_indices[:EXPECTED_NUM_QUESTIONS]
 
     if len(question_col_indices) < MIN_EXPECTED_QUESTION_COLS:
-        limit = 1 + max(MIN_EXPECTED_QUESTION_COLS, EXPECTED_NUM_QUESTIONS or 0)
-        question_col_indices = list(range(1, min(len(col_intervals), limit)))
+        max_q = max(MIN_EXPECTED_QUESTION_COLS, EXPECTED_NUM_QUESTIONS or 0)
+        question_col_indices = [
+            i for i in range(len(col_intervals)) if i != name_col_idx
+        ][:max_q]
 
     name_col = col_intervals[name_col_idx]
+
+    print(f"\n[build] candidate_student_rows ({len(candidate_student_rows)} rows):")
+    for i, (y1, y2) in enumerate(candidate_student_rows):
+        print(f"  candidate {i}: y=({y1},{y2}) h={y2-y1}")
+
     raw_names = ocr_names(img, name_col, candidate_student_rows)
 
     student_rows, student_names = [], []
     for interval, name in zip(candidate_student_rows, raw_names):
+        y1, y2 = interval
+        print(f"  [filter] y=({y1},{y2}) h={y2-y1}  name={name!r}  "
+              f"→ {'KEEP' if name and name != '__TOTAL__' and len(name) >= 3 else 'DROP'}")
         if not name or name == "__TOTAL__" or len(name) < 3:
             continue
         student_rows.append(interval)
@@ -784,75 +955,84 @@ def build_final_table(img: np.ndarray):
     question_headers = []
     for idx in question_col_indices:
         h = headers[idx] if idx < len(headers) else ""
-        # Keep the OCR result if it looks like a valid question number
-        # Valid formats: "35-A", "36", "38-C", etc.
-        if not h or not re.search(r"\d", h):
-            # Only use fallback if header is empty or has no digits
-            h = f"Q{len(question_headers)+1}"
         question_headers.append(h)
 
-    # Pattern-based inference: fix OCR errors by detecting sequences
-    # If we see "36-A" followed by a short/invalid header, infer it should be "36-B"
-    final_question_headers = []
-    for i, h in enumerate(question_headers):
-        # Check for pattern like "38-B" followed by "38" -> should be "38-C"
-        # This must be checked FIRST before the single-digit logic
-        if i > 0 and re.match(r"^\d+$", h):
-            prev = final_question_headers[-1]
-            m = re.match(r"(\d+)-([A-Z])", prev)
-            if m and m.group(1) == h:
-                # Previous was "N-X", current is "N" -> make it "N-Y"
-                next_letter = chr(ord(m.group(2)) + 1)
-                h = f"{h}-{next_letter}"
-                final_question_headers.append(h)
-                continue
-        
-        # Check if this header looks incomplete (single digit or very short)
-        # Only apply if it's REALLY short (1-2 chars) and doesn't look like a valid question number
-        if len(h) <= 2 and h.isdigit() and i > 0:
-            # Look at the previous header to infer the pattern
-            prev = final_question_headers[-1]
-            # Extract base number and letter from previous header
-            m = re.match(r"(\d+)-([A-Z])", prev)
-            if m:
-                base_num = m.group(1)
-                prev_letter = m.group(2)
-                # If current header matches the base number OR just the last digit
-                if h == base_num or h == base_num[-1]:
-                    next_letter = chr(ord(prev_letter) + 1)
-                    h = f"{base_num}-{next_letter}"
-                # Also check if next header (if exists) suggests a pattern
-                # E.g., "36-A", "5", "37" -> "5" should be "36-B"
-                # Only apply if current value is VERY suspicious (single digit, not sequential)
-                elif len(h) == 1 and i + 1 < len(question_headers):
-                    next_h = question_headers[i + 1]
-                    if next_h.isdigit():
-                        next_num = int(next_h)
-                        base_int = int(base_num)
-                        curr_int = int(h)
-                        # Only infer if: next is close to base AND current doesn't fit the sequence
-                        # E.g., 36-A, 5, 37 -> 5 doesn't fit, so make it 36-B
-                        if abs(next_num - base_int) <= 1 and curr_int != base_int + 1:
-                            next_letter = chr(ord(prev_letter) + 1)
-                            h = f"{base_num}-{next_letter}"
-        
-        final_question_headers.append(h)
+    final_question_headers = reconcile_question_headers(
+        question_headers,
+        EXPECTED_QUESTION_HEADERS
+    )
+    
+    # Ensure unique column headers by appending suffix for duplicates
+    seen = {}
+    unique_headers = []
+    for h in final_question_headers:
+        if h in seen:
+            seen[h] += 1
+            unique_h = f"{h}_{seen[h]}"
+            unique_headers.append(unique_h)
+            print(f"  [headers] Duplicate header '{h}' renamed to '{unique_h}'")
+        else:
+            seen[h] = 0
+            unique_headers.append(h)
+    final_question_headers = unique_headers
 
     records, conf_records, density_records = [], [], []
+
+    print(f"\n[build] student_rows intervals:")
+    for i, (y1, y2) in enumerate(student_rows):
+        print(f"  row{i+1}: y=({y1},{y2}) h={y2-y1}  name={student_names[i]!r}")
 
     for row_i, ((y1, y2), student_name) in enumerate(zip(student_rows, student_names)):
         rec   = {"Nome": student_name}
         c_rec = {"Nome": student_name}
         d_rec = {"Nome": student_name}
 
+        # Debug: save the full student row so we can see what region is being scanned
+        if y2 <= y1:
+            print(f"  [WARN] row{row_i+1} has degenerate interval y=({y1},{y2}), skipping")
+            records.append(rec)
+            conf_records.append(c_rec)
+            density_records.append(d_rec)
+            continue
+
+        row_crop = crop(img, 0, y1, img.shape[1], y2, pad=0)
+        if row_crop is not None:
+            save_debug(f"row{row_i+1}_FULLROW.png", row_crop)
+        else:
+            print(f"  [WARN] row{row_i+1} FULLROW crop returned None y=({y1},{y2}) img_h={img.shape[0]}")
+
         for q_pos, col_idx in enumerate(question_col_indices):
+            # Guard: col_idx must be a valid index into col_intervals
+            if col_idx >= len(col_intervals):
+                print(f"  [WARN] col_idx={col_idx} out of range (len={len(col_intervals)}), skipping")
+                continue
+
             x1, x2 = col_intervals[col_idx]
             q_name  = final_question_headers[q_pos]
+            debug_name = f"row{row_i+1}_{q_name}"
+            
+            # Debug: print first row processing details
+            if row_i == 0:
+                print(f"  [DEBUG row1] Processing q_pos={q_pos} col_idx={col_idx} q_name={q_name} x=({x1},{x2})")
+            
             cell    = crop(img, x1, y1, x2, y2, pad=4)
 
-            # usa a versão v4 corrigida
-            result  = detect_filled_option_v4(cell, debug_name=f"row{row_i+1}_{q_name}")
+            if cell is None:
+                # Cell is geometrically degenerate — log it and write a red debug tile
+                print(f"  [WARN] crop returned None for {debug_name} "
+                      f"col=({x1},{x2}) row=({y1},{y2})")
+                # Write a small red placeholder so the debug folder always has an entry
+                placeholder = np.zeros((40, 60, 3), dtype=np.uint8)
+                placeholder[:] = (0, 0, 180)
+                cv2.putText(placeholder, "NONE", (4, 26),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                save_debug(f"{debug_name}_cell.png", placeholder)
+                rec[q_name]   = ""
+                c_rec[q_name] = 0.0
+                d_rec[q_name] = 0.0
+                continue
 
+            result  = detect_filled_option_v4(cell, debug_name=debug_name)
             rec[q_name]   = result.label if result.label is not None else ""
             c_rec[q_name] = round(result.confidence, 3)
             d_rec[q_name] = round(result.density, 3)
@@ -872,27 +1052,25 @@ def build_final_table(img: np.ndarray):
         "student_names": student_names
     }
 
+# ============================================================
+# BATCH / SINGLE PROCESSING (unchanged)
+# ============================================================
+
 def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bool:
-    """
-    Processa uma única imagem e salva os resultados.
-    Retorna True se bem-sucedido, False caso contrário.
-    """
     try:
         img = cv2.imread(image_path)
         if img is None:
             print(f"  ❌ Erro ao abrir imagem: {image_path}")
             return False
 
-        # Temporariamente sobrescreve DEBUG_DIR para esta imagem
         global DEBUG_DIR
         original_debug_dir = DEBUG_DIR
         DEBUG_DIR = debug_dir
-        Path(DEBUG_DIR).mkdir(parents=True, exist_ok=True)
+        clear_debug_dir(DEBUG_DIR)
 
         pre = preprocess_document(img)
         df, df_conf, df_density, meta = build_final_table(pre)
 
-        # Salva CSVs
         Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_csv, index=False, encoding="utf-8-sig")
         conf_path = output_csv.replace(".csv", "_confianca.csv")
@@ -900,7 +1078,6 @@ def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bo
         df_conf.to_csv(conf_path, index=False, encoding="utf-8-sig")
         df_density.to_csv(density_path, index=False, encoding="utf-8-sig")
 
-        # Restaura DEBUG_DIR
         DEBUG_DIR = original_debug_dir
 
         print(f"  ✓ Processado: {Path(image_path).name}")
@@ -915,25 +1092,10 @@ def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bo
 
 
 def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
-    """
-    Processa todas as imagens em uma pasta.
-    
-    Estrutura de saída:
-    output_dir/
-      ├── image1/
-      │   ├── resultado.csv
-      │   ├── resultado_confianca.csv
-      │   ├── resultado_densidade.csv
-      │   └── debug/
-      ├── image2/
-      │   └── ...
-      └── summary.txt
-    """
     input_path = Path(input_folder)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Encontra todas as imagens
     image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif'}
     image_files = [
         f for f in input_path.iterdir()
@@ -947,10 +1109,7 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     print(f"\n{'='*60}")
     print(f"PROCESSAMENTO EM LOTE")
     print(f"{'='*60}")
-    print(f"Pasta de entrada: {input_folder}")
-    print(f"Pasta de saída:   {output_dir}")
     print(f"Total de imagens: {len(image_files)}")
-    print(f"{'='*60}\n")
 
     results = []
     successful = 0
@@ -958,65 +1117,34 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
 
     for i, image_file in enumerate(image_files, 1):
         print(f"[{i}/{len(image_files)}] Processando: {image_file.name}")
-        
-        # Cria subpasta para esta imagem
         image_stem = image_file.stem
         image_output_dir = output_path / image_stem
         image_output_dir.mkdir(exist_ok=True)
-        
-        # Define caminhos de saída
         output_csv = str(image_output_dir / "resultado.csv")
         debug_dir = str(image_output_dir / "debug")
-        
-        # Processa a imagem
         success = process_single_image(str(image_file), output_csv, debug_dir)
-        
-        results.append({
-            'file': image_file.name,
-            'success': success,
-            'output_dir': str(image_output_dir)
-        })
-        
+        results.append({'file': image_file.name, 'success': success, 'output_dir': str(image_output_dir)})
         if success:
             successful += 1
         else:
             failed += 1
         print()
 
-    # Gera resumo
-    print(f"{'='*60}")
-    print(f"RESUMO DO PROCESSAMENTO")
-    print(f"{'='*60}")
-    print(f"Total processado: {len(image_files)}")
-    print(f"Sucesso:          {successful} ({successful/len(image_files)*100:.1f}%)")
-    print(f"Falhas:           {failed} ({failed/len(image_files)*100:.1f}%)")
-    print(f"{'='*60}\n")
+    print(f"Sucesso: {successful} | Falhas: {failed}")
 
-    # Salva resumo em arquivo
     summary_file = output_path / "summary.txt"
     with open(summary_file, 'w', encoding='utf-8') as f:
-        f.write(f"RESUMO DO PROCESSAMENTO EM LOTE\n")
-        f.write(f"{'='*60}\n")
-        f.write(f"Data: {pd.Timestamp.now()}\n")
-        f.write(f"Pasta de entrada: {input_folder}\n")
-        f.write(f"Pasta de saída: {output_dir}\n\n")
-        f.write(f"Total processado: {len(image_files)}\n")
-        f.write(f"Sucesso: {successful}\n")
-        f.write(f"Falhas: {failed}\n\n")
-        f.write(f"{'='*60}\n")
-        f.write(f"DETALHES POR IMAGEM\n")
-        f.write(f"{'='*60}\n\n")
-        
+        f.write(f"RESUMO DO PROCESSAMENTO EM LOTE\n{'='*60}\n")
+        f.write(f"Total: {len(image_files)} | Sucesso: {successful} | Falhas: {failed}\n\n")
         for result in results:
             status = "✓ SUCESSO" if result['success'] else "✗ FALHA"
-            f.write(f"{status}: {result['file']}\n")
-            f.write(f"  Saída: {result['output_dir']}\n\n")
-
+            f.write(f"{status}: {result['file']}\n  Saída: {result['output_dir']}\n\n")
     print(f"Resumo salvo em: {summary_file}")
-    print(f"Resultados salvos em: {output_dir}/")
 
 
 def main():
+    clear_debug_dir(DEBUG_DIR)
+
     img = cv2.imread(IMAGE_PATH)
     if img is None:
         raise FileNotFoundError(f"Não foi possível abrir a imagem: {IMAGE_PATH}")

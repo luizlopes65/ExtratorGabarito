@@ -3,135 +3,40 @@ import numpy as np
 import pandas as pd
 import pytesseract
 import re
-import time
-import cProfile
-import pstats
-import io
-import functools
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Callable
-from collections import defaultdict
-import concurrent.futures
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
 
-IMAGE_PATH = "examples/image.png"
-OUTPUT_CSV = "resultados/resultado_gabarito_profiling.csv"
-DEBUG_DIR = "debug/debug_gabarito_profiling"
+IMAGE_PATH = "examples/WhatsApp Image 2026-05-02 at 09.57.00.jpeg"
+OUTPUT_CSV = "resultados/resultado_gabarito_v3.csv"
+DEBUG_DIR = "debug/debug_gabarito_v3"
 
 TESSERACT_CMD = r"/opt/homebrew/bin/tesseract"
+
 OCR_LANG = "por+eng"
+
 OPTION_LABELS = ["B", "1", "2", "3"]
-OCR_MAX_WORKERS = 4
-ENABLE_DEBUG_IMAGES = False
-PROFILE_DETAILED = False
 
 MIN_EXPECTED_QUESTION_COLS = 8
 MIN_EXPECTED_STUDENT_ROWS = 3
+
 GRID_CLUSTER_TOLERANCE = 12
-ROW_HEIGHT_MIN = 30  # Reduced to capture shorter header rows (aligned with fixed version)
+ROW_HEIGHT_MIN = 20  # Reduced to capture shorter header rows (some are ~26px)
 COL_WIDTH_MIN = 25
+
 EXPECTED_NUM_QUESTIONS = None
 
+
 MIN_FILL_DENSITY = 0.05
+
 MIN_INNER_DIFF = 5
+
+# Razão máxima entre segunda e primeira densidade para marcar dupla.
 MAX_SECOND_RATIO = 0.65
-
-# ============================================================
-# PROFILING — decorator + registro global
-# ============================================================
-
-_profile_stats: dict[str, dict] = defaultdict(lambda: {
-    "calls": 0,
-    "total_s": 0.0,
-    "min_s": float("inf"),
-    "max_s": 0.0,
-})
-
-def profile(fn: Callable) -> Callable:
-    """Decorator leve: mede wall-time de cada chamada e acumula estatísticas."""
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        if not PROFILE_DETAILED:
-            return fn(*args, **kwargs)
-        t0 = time.perf_counter()
-        result = fn(*args, **kwargs)
-        elapsed = time.perf_counter() - t0
-        s = _profile_stats[fn.__name__]
-        s["calls"]   += 1
-        s["total_s"] += elapsed
-        s["min_s"]    = min(s["min_s"], elapsed)
-        s["max_s"]    = max(s["max_s"], elapsed)
-        return result
-    return wrapper
-
-def print_profile_report():
-    """Imprime tabela de profiling e relatório cProfile já capturado."""
-    rows = []
-    for name, s in _profile_stats.items():
-        calls = s["calls"]
-        total = s["total_s"]
-        avg   = total / calls if calls else 0
-        rows.append({
-            "Função":          name,
-            "Chamadas":        calls,
-            "Total (ms)":      round(total * 1000, 2),
-            "Média (ms)":      round(avg  * 1000, 3),
-            "Mín (ms)":        round(s["min_s"] * 1000, 3),
-            "Máx (ms)":        round(s["max_s"] * 1000, 3),
-        })
-    rows.sort(key=lambda r: -r["Total (ms)"])
-    df = pd.DataFrame(rows)
-
-    print("\n" + "=" * 78)
-    print("  RELATÓRIO DE PROFILING POR FUNÇÃO (wall-time, decorator)")
-    print("=" * 78)
-    print(df.to_string(index=False))
-    df.to_csv("profile_por_funcao.csv", index=False, encoding="utf-8-sig")
-    print("\n→ Salvo em profile_por_funcao.csv")
-
-    # Resumo por camada
-    camadas = {
-        "1 · Pré-processamento": [
-            "preprocess_document", "find_document_contour",
-            "four_point_transform",
-        ],
-        "2 · Detecção de grade": [
-            "get_table_structure", "binarize_for_grid", "detect_grid_masks",
-            "extract_line_positions", "cluster_positions",
-        ],
-        "3 · OCR": [
-            "ocr_headers", "ocr_names", "ocr_text_block",
-            "run_ocr_boxes", "clean_question_header", "clean_name",
-        ],
-        "4 · Análise de células": [
-            "detect_filled_option_v4", "preprocess_cell", "binarize_cell",
-            "measure_band_density", "estimate_bubble_x",
-            "component_candidates_in_band", "score_candidate",
-            "fallback_circle_in_band",
-        ],
-        "5 · Montagem final": [
-            "build_final_table", "identify_header_and_student_rows",
-            "choose_question_columns",
-        ],
-    }
-
-    print("\n" + "=" * 78)
-    print("  RESUMO POR CAMADA")
-    print("=" * 78)
-    for camada, funcs in camadas.items():
-        total_camada = sum(
-            _profile_stats[f]["total_s"] for f in funcs if f in _profile_stats
-        )
-        calls_camada = sum(
-            _profile_stats[f]["calls"] for f in funcs if f in _profile_stats
-        )
-        print(f"  {camada:<40} {total_camada*1000:>10.1f} ms  ({calls_camada} chamadas)")
-    print()
-
 
 # ============================================================
 # ESTRUTURAS
@@ -141,15 +46,17 @@ def print_profile_report():
 class OCRBox:
     text: str
     conf: float
-    x: int; y: int; w: int; h: int
+    x: int
+    y: int
+    w: int
+    h: int
 
 @dataclass
 class CellResult:
-    label: Optional[str]
+    label: Optional[str]       # None = em branco
     confidence: float
-    density: float
-    fill_detected: bool
-
+    density: float             # NOVO: densidade da opção escolhida (0.0–1.0)
+    fill_detected: bool        # NOVO: True se densidade passou do limiar
 
 # ============================================================
 # INICIALIZAÇÃO
@@ -160,14 +67,11 @@ if TESSERACT_CMD:
 
 Path(DEBUG_DIR).mkdir(exist_ok=True)
 
-
 # ============================================================
 # UTILITÁRIOS GERAIS
 # ============================================================
 
 def save_debug(name: str, img: np.ndarray):
-    if not ENABLE_DEBUG_IMAGES:
-        return
     cv2.imwrite(str(Path(DEBUG_DIR) / name), img)
 
 def to_gray(img: np.ndarray) -> np.ndarray:
@@ -186,7 +90,7 @@ def safe_int(v, default=0):
 
 def order_points(pts: np.ndarray) -> np.ndarray:
     rect = np.zeros((4, 2), dtype="float32")
-    s    = pts.sum(axis=1)
+    s = pts.sum(axis=1)
     diff = np.diff(pts, axis=1)
     rect[0] = pts[np.argmin(s)]
     rect[2] = pts[np.argmax(s)]
@@ -194,12 +98,11 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-@profile
 def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
     rect = order_points(pts)
     (tl, tr, br, bl) = rect
-    widthA  = np.linalg.norm(br - bl)
-    widthB  = np.linalg.norm(tr - tl)
+    widthA = np.linalg.norm(br - bl)
+    widthB = np.linalg.norm(tr - tl)
     maxWidth = max(int(widthA), int(widthB))
     heightA = np.linalg.norm(tr - br)
     heightB = np.linalg.norm(tl - bl)
@@ -211,7 +114,6 @@ def four_point_transform(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
     M = cv2.getPerspectiveTransform(rect, dst)
     return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
-@profile
 def cluster_positions(values: List[int], tolerance: int = 10) -> List[int]:
     if not values:
         return []
@@ -224,22 +126,22 @@ def cluster_positions(values: List[int], tolerance: int = 10) -> List[int]:
             groups.append([v])
     return [int(round(np.mean(g))) for g in groups]
 
-def crop(img: np.ndarray, x1, y1, x2, y2, pad=0) -> Optional[np.ndarray]:
-    x1 = max(0, x1 + pad);  y1 = max(0, y1 + pad)
-    x2 = min(img.shape[1], x2 - pad);  y2 = min(img.shape[0], y2 - pad)
+def crop(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, pad: int = 0) -> Optional[np.ndarray]:
+    x1 = max(0, x1 + pad)
+    y1 = max(0, y1 + pad)
+    x2 = min(img.shape[1], x2 - pad)
+    y2 = min(img.shape[0], y2 - pad)
     if x2 <= x1 or y2 <= y1:
         return None
     return img[y1:y2, x1:x2].copy()
-
 
 # ============================================================
 # PRÉ-PROCESSAMENTO GEOMÉTRICO
 # ============================================================
 
-@profile
 def find_document_contour(gray: np.ndarray) -> Optional[np.ndarray]:
-    blur     = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged    = cv2.Canny(blur, 40, 140)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blur, 40, 140)
     contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
     area_img = gray.shape[0] * gray.shape[1]
@@ -247,13 +149,12 @@ def find_document_contour(gray: np.ndarray) -> Optional[np.ndarray]:
         area = cv2.contourArea(cnt)
         if area < area_img * 0.25:
             continue
-        peri  = cv2.arcLength(cnt, True)
+        peri = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
         if len(approx) == 4:
             return approx.reshape(4, 2)
     return None
 
-@profile
 def preprocess_document(img: np.ndarray) -> np.ndarray:
     gray = to_gray(img)
     
@@ -265,120 +166,74 @@ def preprocess_document(img: np.ndarray) -> np.ndarray:
     save_debug("01_preprocessed.png", img)
     return img
 
-
 # ============================================================
 # DETECÇÃO DA GRADE
 # ============================================================
 
-@profile
 def binarize_for_grid(gray: np.ndarray) -> np.ndarray:
     return cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 25, 10
     )
 
-@profile
 def detect_grid_masks(bin_img: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     h, w = bin_img.shape
-    vk   = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(25, h // 28)))
-    hk   = cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 28), 1))
-    vertical   = cv2.morphologyEx(bin_img, cv2.MORPH_OPEN, vk, iterations=1)
-    horizontal = cv2.morphologyEx(bin_img, cv2.MORPH_OPEN, hk, iterations=1)
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(25, h // 28)))
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(25, w // 28), 1))
+    vertical = cv2.morphologyEx(bin_img, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+    horizontal = cv2.morphologyEx(bin_img, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
     return vertical, horizontal
 
-@profile
 def extract_line_positions(line_img: np.ndarray, axis: str) -> List[int]:
     contours, _ = cv2.findContours(line_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     coords = []
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         if axis == "vertical":
-            if h > 40: coords.append(x + w // 2)
+            if h > 40:
+                coords.append(x + w // 2)
         else:
-            if w > 40: coords.append(y + h // 2)
-    return coords
-# ============================================================
-# FIX: Filter spurious margin columns
-# ============================================================
+            if w > 40:
+                coords.append(y + h // 2)
+    return cluster_positions(coords, tolerance=GRID_CLUSTER_TOLERANCE)
 
-NARROW_COL_RATIO = 0.40   # drop if width < median_width * this
-
-@profile
-def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int) -> List[Tuple[int, int]]:
-    """
-    Remove columns that are artifacts of vertical margin text (URL, watermark, etc.).
-
-    Strategy:
-    1. Compute the median column width among all intervals.
-    2. Drop any column narrower than NARROW_COL_RATIO * median_width.
-    3. Also drop columns whose centre is in the outermost 3% of the image width,
-       which is where rotated margin text typically lives.
-    """
-    if not col_intervals:
-        return col_intervals
-
-    widths = [x2 - x1 for x1, x2 in col_intervals]
-    median_w = float(np.median(widths))
-    min_w = NARROW_COL_RATIO * median_w
-
-    margin_px = int(img_width * 0.03)  # outermost 3% on each side (reduced from 7% to avoid filtering valid columns)
-
-    filtered = []
-    for x1, x2 in col_intervals:
-        w = x2 - x1
-        cx = (x1 + x2) / 2
-        if w < min_w:
-            print(f"  [filter_cols] Dropping narrow column x={x1}-{x2} (w={w:.0f} < {min_w:.0f})")
-            continue
-        if cx < margin_px or cx > img_width - margin_px:
-            print(f"  [filter_cols] Dropping margin column x={x1}-{x2} (cx={cx:.0f})")
-            continue
-        filtered.append((x1, x2))
-
-    if not filtered:
-        print("  [filter_cols] WARNING: all columns were filtered — reverting to original")
-        return col_intervals
-
-    return filtered
-
-
-@profile
 def get_table_structure(img: np.ndarray):
     gray = to_gray(img)
-    bw   = binarize_for_grid(gray)
+    bw = binarize_for_grid(gray)
     vertical, horizontal = detect_grid_masks(bw)
     save_debug("02_grid_bw.png", bw)
     save_debug("03_vertical.png", vertical)
     save_debug("04_horizontal.png", horizontal)
-    xs = cluster_positions(extract_line_positions(vertical,   "vertical"),   tolerance=GRID_CLUSTER_TOLERANCE)
+    xs = cluster_positions(extract_line_positions(vertical, "vertical"), tolerance=GRID_CLUSTER_TOLERANCE)
     ys = cluster_positions(extract_line_positions(horizontal, "horizontal"), tolerance=GRID_CLUSTER_TOLERANCE)
+    col_intervals = [(xs[i], xs[i+1]) for i in range(len(xs)-1) if xs[i+1]-xs[i] >= COL_WIDTH_MIN]
     
-    raw_col_intervals = [(xs[i], xs[i+1]) for i in range(len(xs)-1) if xs[i+1]-xs[i] >= COL_WIDTH_MIN]
-    
-    # ── FIX: remove margin/artifact columns ──
-    col_intervals = filter_margin_columns(raw_col_intervals, img.shape[1])
+    # Debug: show all row heights before filtering
+    all_row_heights = [(ys[i], ys[i+1], ys[i+1]-ys[i]) for i in range(len(ys)-1)]
+    print(f"\nAll detected row positions (y1, y2, height):")
+    for y1, y2, h in all_row_heights:
+        status = "✓ KEPT" if h >= ROW_HEIGHT_MIN else f"✗ FILTERED (< {ROW_HEIGHT_MIN}px)"
+        print(f"  Row {y1:4d}-{y2:4d}: {h:3d}px {status}")
     
     row_intervals = [(ys[i], ys[i+1]) for i in range(len(ys)-1) if ys[i+1]-ys[i] >= ROW_HEIGHT_MIN]
     dbg = img.copy()
-    for x in xs: cv2.line(dbg, (x, 0), (x, dbg.shape[0]-1), (0, 0, 255), 1)
-    for y in ys: cv2.line(dbg, (0, y), (dbg.shape[1]-1, y), (255, 0, 0), 1)
+    for x in xs:
+        cv2.line(dbg, (x, 0), (x, dbg.shape[0]-1), (0, 0, 255), 1)
+    for y in ys:
+        cv2.line(dbg, (0, y), (dbg.shape[1]-1, y), (255, 0, 0), 1)
     save_debug("05_detected_grid_lines.png", dbg)
     return xs, ys, col_intervals, row_intervals
-
 
 # ============================================================
 # OCR
 # ============================================================
 
-@profile
-def run_ocr_boxes(img: np.ndarray, psm: int = 6,
-                  whitelist: Optional[str] = None) -> List[OCRBox]:
-    gray   = to_gray(img)
+def run_ocr_boxes(img: np.ndarray, psm: int = 6, whitelist: Optional[str] = None) -> List[OCRBox]:
+    gray = to_gray(img)
     config = f"--oem 3 --psm {psm}"
     if whitelist:
         config += f' -c tessedit_char_whitelist="{whitelist}"'
-    data  = pytesseract.image_to_data(gray, lang=OCR_LANG, config=config,
-                                       output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(gray, lang=OCR_LANG, config=config, output_type=pytesseract.Output.DICT)
     boxes = []
     for i in range(len(data["text"])):
         text = normalize_whitespace(data["text"][i])
@@ -395,34 +250,26 @@ def run_ocr_boxes(img: np.ndarray, psm: int = 6,
         ))
     return boxes
 
-@profile
-def ocr_text_block(img: np.ndarray, psm: int = 6,
-                   whitelist: Optional[str] = None) -> str:
+def ocr_text_block(img: np.ndarray, psm: int = 6, whitelist: Optional[str] = None) -> str:
     gray = to_gray(img)
     
     # Try with adaptive thresholding first
     proc = cv2.GaussianBlur(gray, (3, 3), 0)
-    proc = cv2.adaptiveThreshold(proc, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY, 31, 10)
+    proc = cv2.adaptiveThreshold(proc, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10)
     config = f"--oem 3 --psm {psm}"
     if whitelist:
         config += f' -c tessedit_char_whitelist="{whitelist}"'
     
-    result = normalize_whitespace(
-        pytesseract.image_to_string(proc, lang=OCR_LANG, config=config)
-    )
+    result = normalize_whitespace(pytesseract.image_to_string(proc, lang=OCR_LANG, config=config))
     
     # If result is too short or doesn't contain expected patterns, try without preprocessing
     if len(result) < 2 or not re.search(r"\d", result):
-        result_raw = normalize_whitespace(
-            pytesseract.image_to_string(gray, lang=OCR_LANG, config=config)
-        )
+        result_raw = normalize_whitespace(pytesseract.image_to_string(gray, lang=OCR_LANG, config=config))
         if len(result_raw) > len(result):
             result = result_raw
     
     return result
 
-@profile
 def clean_question_header(text: str) -> str:
     """
     Extract question number from OCR text.
@@ -452,18 +299,15 @@ def clean_question_header(text: str) -> str:
     # Otherwise, return the last match
     return matches[-1]
 
-@profile
 def clean_name(text: str) -> str:
     text = normalize_whitespace(text)
     text = re.sub(r"[^A-Za-zÀ-ÿ0-9\s\-']", "", text)
     return normalize_whitespace(text)
 
-
 # ============================================================
 # IDENTIFICAÇÃO DE REGIÕES
 # ============================================================
 
-@profile
 def identify_header_and_student_rows(img, row_intervals):
     """
     Identify which row is the header (with question numbers) and which are student rows.
@@ -480,13 +324,12 @@ def identify_header_and_student_rows(img, row_intervals):
     heights = [y2 - y1 for y1, y2 in row_intervals]
     median_h = np.median(heights)
     
-    # Among the first 2-3 rows, find the shortest one - that's the header
-    # The header row is typically much shorter than student rows
+
     candidates = row_intervals[:min(3, len(row_intervals))]
     candidate_heights = [(y2 - y1, idx, (y1, y2)) for idx, (y1, y2) in enumerate(candidates)]
-    
     # Sort by height (ascending) - shortest first
     candidate_heights.sort(key=lambda x: x[0])
+    print(candidate_heights)
     
     # The shortest row among the first 2-3 is the header
     header_height, header_row_idx, header_row = candidate_heights[0]
@@ -500,16 +343,15 @@ def identify_header_and_student_rows(img, row_intervals):
     
     return header_row, student_rows
 
-@profile
 def ocr_headers(img, col_intervals, header_row):
     y1, y2 = header_row
-    # Cria uma lista pré-alocada para manter a ordem correta
-    headers = [""] * len(col_intervals)
-    
-    def _process_header(idx, x1, x2):
+    headers = []
+    for idx, (x1, x2) in enumerate(col_intervals):
+        # Keep original padding of 3 (padding shrinks the cell to avoid grid lines)
         cell = crop(img, x1, y1, x2, y2, pad=3)
         if cell is None:
-            return idx, ""
+            headers.append("")
+            continue
         
         # Use PSM 6 (uniform block of text) instead of PSM 7 (single line)
         # This helps capture multi-line headers like "36\n36-B"
@@ -517,93 +359,65 @@ def ocr_headers(img, col_intervals, header_row):
             cell, psm=6,
             whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"
         ))
-        
-        if ENABLE_DEBUG_IMAGES:
-            vis = cell.copy()
-            cv2.putText(vis, text, (5, min(20, vis.shape[0]-5)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
-            save_debug(f"header_col_{idx+1}.png", vis)
-
-        return idx, text
-
-    # Executa o OCR em paralelo
-    with concurrent.futures.ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as executor:
-        futures = [executor.submit(_process_header, idx, x1, x2)
-                   for idx, (x1, x2) in enumerate(col_intervals)]
-        
-        for future in concurrent.futures.as_completed(futures):
-            idx, text = future.result()
-            headers[idx] = text
-
+        headers.append(text)
+        vis = cell.copy()
+        cv2.putText(vis, text, (5, min(20, vis.shape[0]-5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+        save_debug(f"header_col_{idx+1}.png", vis)
     return headers
 
-
-@profile
 def ocr_names(img, name_col, candidate_rows):
+    names = []
     x1, x2 = name_col
-    # Cria uma lista pré-alocada para manter a ordem correta
-    names = [""] * len(candidate_rows)
-
-    def _process_name(idx, y1, y2):
+    for i, (y1, y2) in enumerate(candidate_rows):
         cell = crop(img, x1, y1, x2, y2, pad=4)
         if cell is None:
-            return idx, ""
-        
+            names.append("")
+            continue
         text = clean_name(ocr_text_block(cell, psm=6))
         if re.search(r"\bTOTAL\b", text.upper()):
-            text = "__TOTAL__"
-            
-        if ENABLE_DEBUG_IMAGES:
-            vis = cell.copy()
-            cv2.putText(vis, (text or "(vazio)")[:40], (5, min(20, vis.shape[0]-5)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-            save_debug(f"name_row_{idx+1}.png", vis)
-
-        return idx, text
-
-    # Executa o OCR em paralelo
-    with concurrent.futures.ThreadPoolExecutor(max_workers=OCR_MAX_WORKERS) as executor:
-        futures = [executor.submit(_process_name, i, y1, y2) 
-                   for i, (y1, y2) in enumerate(candidate_rows)]
-        
-        for future in concurrent.futures.as_completed(futures):
-            idx, text = future.result()
-            names[idx] = text
-
+            names.append("__TOTAL__")
+        else:
+            names.append(text)
+        vis = cell.copy()
+        cv2.putText(vis, (text or "(vazio)")[:40], (5, min(20, vis.shape[0]-5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
+        save_debug(f"name_row_{i+1}.png", vis)
     return names
 
+#_________________________________
 
-# ============================================================
-# ANÁLISE DE CÉLULAS
-# ============================================================
-
-@profile
 def preprocess_cell(cell: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(to_gray(cell), (5, 5), 0)
 
-@profile
 def binarize_cell(gray: np.ndarray) -> np.ndarray:
-    bw     = cv2.adaptiveThreshold(
+    bw = cv2.adaptiveThreshold(
         gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV, 31, 10
     )
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     return cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
 
-@profile
-def measure_band_density(bw: np.ndarray, y1: int, y2: int,
-                          x_margin: int = 4) -> float:
+def measure_band_density(bw: np.ndarray, y1: int, y2: int, x_margin: int = 4) -> float:
+    """
+    FIX: Mede a densidade de pixels escuros em uma faixa da célula binarizada.
+    Ignora as margens laterais (bordas da tabela) e a margem vertical (linhas).
+    Retorna valor entre 0.0 e 1.0.
+    """
     h = y2 - y1
     if h <= 0:
         return 0.0
+
+    # margem vertical: ignora 2px no topo e fim da faixa (linhas da grade)
     y_inner_start = y1 + 2
     y_inner_end   = y2 - 2
+
     band = bw[y_inner_start:y_inner_end, x_margin:-x_margin]
     if band.size == 0:
         return 0.0
+
     return float(cv2.countNonZero(band)) / band.size
 
-@profile
 def estimate_bubble_x(gray: np.ndarray, bw: np.ndarray) -> int:
     proj = bw.sum(axis=0).astype(np.float32)
     if proj.max() <= 0:
@@ -614,12 +428,9 @@ def estimate_bubble_x(gray: np.ndarray, bw: np.ndarray) -> int:
     proj_smooth = cv2.GaussianBlur(proj.reshape(1, -1), (k, 1), 0).reshape(-1)
     return int(np.argmax(proj_smooth))
 
-@profile
-def component_candidates_in_band(gray, bw, y1, y2, x_center,
-                                   x_tol_ratio=0.22):
-    band_bw   = bw[y1:y2, :]
-    contours, _ = cv2.findContours(band_bw, cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE)
+def component_candidates_in_band(gray, bw, y1, y2, x_center, x_tol_ratio=0.22):
+    band_bw = bw[y1:y2, :]
+    contours, _ = cv2.findContours(band_bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     H, W = gray.shape
     x_tol = max(12, int(W * x_tol_ratio))
     candidates = []
@@ -647,23 +458,21 @@ def component_candidates_in_band(gray, bw, y1, y2, x_center,
         candidates.append((cx, cy, r, area, circularity))
     return candidates
 
-@profile
 def score_candidate(gray, cx, cy, r):
     r_inner = max(3, int(r * 0.60))
     r_ring  = max(r_inner + 1, int(r * 0.95))
     mask_inner = np.zeros_like(gray, dtype=np.uint8)
     cv2.circle(mask_inner, (cx, cy), r_inner, 255, -1)
     mask_outer = np.zeros_like(gray, dtype=np.uint8)
-    cv2.circle(mask_outer, (cx, cy), r_ring,  255, -1)
+    cv2.circle(mask_outer, (cx, cy), r_ring, 255, -1)
     cv2.circle(mask_outer, (cx, cy), max(1, r_inner), 0, -1)
     return {
         "mean_inner": cv2.mean(gray, mask=mask_inner)[0],
         "mean_ring":  cv2.mean(gray, mask=mask_outer)[0],
     }
 
-@profile
 def fallback_circle_in_band(gray, y1, y2, x_center):
-    band    = gray[y1:y2, :]
+    band = gray[y1:y2, :]
     circles = cv2.HoughCircles(
         band, cv2.HOUGH_GRADIENT, dp=1.15,
         minDist=max(10, (y2-y1)//2), param1=90, param2=10,
@@ -680,20 +489,32 @@ def fallback_circle_in_band(gray, y1, y2, x_center):
             candidates.append((cx, cy, r))
     return candidates
 
-@profile
-def detect_filled_option_v4(cell: np.ndarray,
-                              debug_name: Optional[str] = None) -> CellResult:
+def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) -> CellResult:
+    """
+    Versão corrigida: adiciona pré-filtro de densidade antes de decidir pela opção.
+
+    Mudanças em relação à v3:
+    1. `measure_band_density` calcula a fração de pixels escuros em cada faixa,
+       ignorando as bordas da grade (margens de 2px vertical e 4px horizontal).
+    2. Se NENHUMA faixa atingir MIN_FILL_DENSITY → retorna label=None imediatamente
+       sem executar o pipeline de intensidade (célula em branco).
+    3. A melhor opção só é aceita se SUA faixa também passar de MIN_FILL_DENSITY,
+       evitando falsos positivos causados por artefatos de impressão ou bordas de grade.
+    4. O diff mínimo (MIN_INNER_DIFF) é mantido como segunda guarda.
+    """
     if cell is None or cell.size == 0:
-        return CellResult(label=None, confidence=0.0, density=0.0,
-                          fill_detected=False)
+        return CellResult(label=None, confidence=0.0, density=0.0, fill_detected=False)
 
     gray = preprocess_cell(cell)
     bw   = binarize_cell(gray)
 
-    H, W       = gray.shape
+    H, W = gray.shape
     x_center   = estimate_bubble_x(gray, bw)
     band_edges = np.linspace(0, H, 5).astype(int)
 
+    # ----------------------------------------------------------
+    # FIX 1: pré-filtro de densidade por faixa
+    # ----------------------------------------------------------
     densities = []
     for i in range(4):
         d = measure_band_density(bw, band_edges[i], band_edges[i+1], x_margin=4)
@@ -701,61 +522,52 @@ def detect_filled_option_v4(cell: np.ndarray,
 
     max_density = max(densities)
 
+    
+    # Se nenhuma faixa tem pixels suficientes, célula está em branco
     if max_density < MIN_FILL_DENSITY:
         if debug_name:
             vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
             cv2.putText(vis, f"BRANCO d={max_density:.3f}", (5, H//2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 128, 255), 1,
-                        cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 128, 255), 1, cv2.LINE_AA)
             save_debug(f"{debug_name}_cell.png", vis)
-        return CellResult(label=None, confidence=1.0, density=max_density,
-                          fill_detected=False)
+        return CellResult(label=None, confidence=1.0, density=max_density, fill_detected=False)
 
-    vis = None
-    if debug_name and ENABLE_DEBUG_IMAGES:
-        vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        cv2.line(vis, (x_center, 0), (x_center, H-1), (255, 0, 0), 1)
+    # ----------------------------------------------------------
+    # Pipeline de intensidade (igual à v3)
+    # ----------------------------------------------------------
+    vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    cv2.line(vis, (x_center, 0), (x_center, H-1), (255, 0, 0), 1)
 
     band_results = []
     for i in range(4):
-        y1 = band_edges[i];  y2 = band_edges[i+1]
-        if vis is not None:
-            cv2.rectangle(vis, (0, y1), (W-1, y2-1), (220, 220, 220), 1)
+        y1 = band_edges[i]
+        y2 = band_edges[i+1]
+        cv2.rectangle(vis, (0, y1), (W-1, y2-1), (220, 220, 220), 1)
 
         candidates = component_candidates_in_band(gray, bw, y1, y2, x_center)
-        chosen = None;  chosen_score = None
+        chosen = None
+        chosen_score = None
 
         if candidates:
-            scored = []
-            for cx, cy, r, area, _ in candidates:
-                score = score_candidate(gray, cx, cy, r)
-                scored.append((
-                    score["mean_inner"],
-                    abs(cx - x_center),
-                    -area,
-                    (cx, cy, r),
-                    score,
-                ))
+            scored = [(score_candidate(gray, cx, cy, r)["mean_inner"],
+                       abs(cx - x_center), -area, (cx, cy, r),
+                       score_candidate(gray, cx, cy, r))
+                      for cx, cy, r, area, _ in candidates]
             scored.sort(key=lambda t: (t[0], t[1], t[2]))
             _, _, _, chosen, chosen_score = scored[0]
         else:
             circles = fallback_circle_in_band(gray, y1, y2, x_center)
             if circles:
-                scored = []
-                for cx, cy, r in circles:
-                    score = score_candidate(gray, cx, cy, r)
-                    scored.append((
-                        score["mean_inner"],
-                        abs(cx - x_center),
-                        (cx, cy, r),
-                        score,
-                    ))
+                scored = [(score_candidate(gray, cx, cy, r)["mean_inner"],
+                           abs(cx - x_center), (cx, cy, r),
+                           score_candidate(gray, cx, cy, r))
+                          for cx, cy, r in circles]
                 scored.sort(key=lambda t: (t[0], t[1]))
                 _, _, chosen, chosen_score = scored[0]
 
         if chosen is None:
-            cy_    = int((y1 + y2) / 2)
-            chosen = (x_center, cy_, max(6, min(W, y2-y1) // 6))
+            cy = int((y1 + y2) / 2)
+            chosen = (x_center, cy, max(6, min(W, y2-y1) // 6))
             chosen_score = score_candidate(gray, *chosen)
 
         cx, cy, r = chosen
@@ -769,40 +581,43 @@ def detect_filled_option_v4(cell: np.ndarray,
 
     band_results.sort(key=lambda d: d["cy"])
     means = [d["mean_inner"] for d in band_results]
-    if min(means) > np.mean(means) / 2:
-        return CellResult(label=None, confidence=0, density=0,
-                          fill_detected=False)
+    if min(means) > np.mean(means)/2:
+        return CellResult(label=None, confidence=0,
+                          density=0, fill_detected=False)
     order = np.argsort(means)
 
-    best   = int(order[0]);  second = int(order[1])
+    best   = int(order[0])
+    second = int(order[1])
     diff   = float(means[second] - means[best])
     confidence = max(0.0, min(1.0, diff / 50.0))
 
+    # ----------------------------------------------------------
+    # FIX 2: a faixa escolhida precisa passar no limiar de densidade
+    # ----------------------------------------------------------
     best_density = band_results[best]["density"]
     if best_density < MIN_FILL_DENSITY:
+        # A faixa com menor intensidade não tem pixels suficientes;
+        # provavelmente é artefato de borda de grade → célula em branco
         if debug_name:
-            cv2.putText(vis, f"BRANCO-artefato d={best_density:.3f}",
-                        (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
-                        (0, 128, 255), 1, cv2.LINE_AA)
+            cv2.putText(vis, f"BRANCO-artefato d={best_density:.3f}", (5, H-8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 128, 255), 1, cv2.LINE_AA)
             save_debug(f"{debug_name}_cell.png", vis)
         return CellResult(label=None, confidence=confidence,
                           density=best_density, fill_detected=False)
 
-    if vis is not None:
-        for d in band_results:
-            cv2.circle(vis, (d["cx"], d["cy"]), d["r"], (0, 255, 0), 1)
-            cv2.putText(vis, d["label"], (d["cx"]+d["r"]+3, d["cy"]+3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1,
-                        cv2.LINE_AA)
+    # ----------------------------------------------------------
+    # FIX 3: diff mínimo (guarda original mantida)
+    # ----------------------------------------------------------
+    for d in band_results:
+        cv2.circle(vis, (d["cx"], d["cy"]), d["r"], (0, 255, 0), 1)
+        cv2.putText(vis, d["label"], (d["cx"]+d["r"]+3, d["cy"]+3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
 
     chosen_label = band_results[best]["label"]
-    if vis is not None:
-        cv2.putText(vis,
-                    f"pick={chosen_label} conf={confidence:.2f} d={best_density:.2f}",
-                    (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1,
-                    cv2.LINE_AA)
+    cv2.putText(vis, f"pick={chosen_label} conf={confidence:.2f} d={best_density:.2f}",
+                (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1, cv2.LINE_AA)
 
-    if vis is not None:
+    if debug_name:
         save_debug(f"{debug_name}_cell.png", vis)
 
     if diff < MIN_INNER_DIFF:
@@ -812,19 +627,16 @@ def detect_filled_option_v4(cell: np.ndarray,
     return CellResult(label=chosen_label, confidence=confidence,
                       density=best_density, fill_detected=True)
 
-
 # ============================================================
-# PIPELINE PRINCIPAL
+# PIPELINE PRINCIPAL (idêntico ao original, usa v4)
 # ============================================================
 
 def choose_question_columns(headers, col_intervals):
-    question_cols = [i for i, h in enumerate(headers)
-                     if re.fullmatch(r"\d{1,3}(?:-[A-Z])?", h)]
+    question_cols = [i for i, h in enumerate(headers) if re.fullmatch(r"\d{1,3}(?:-[A-Z])?", h)]
     if not question_cols and len(col_intervals) >= 2:
         question_cols = list(range(1, len(col_intervals)))
     return 0, question_cols
 
-@profile
 def build_final_table(img: np.ndarray):
     xs, ys, col_intervals, row_intervals = get_table_structure(img)
 
@@ -833,8 +645,7 @@ def build_final_table(img: np.ndarray):
     if len(row_intervals) < 2:
         raise RuntimeError("Não foi possível detectar linhas suficientes.")
 
-    header_row, candidate_student_rows = identify_header_and_student_rows(
-        img, row_intervals)
+    header_row, candidate_student_rows = identify_header_and_student_rows(img, row_intervals)
     if header_row is None:
         raise RuntimeError("Não foi possível identificar a linha de cabeçalho.")
 
@@ -848,7 +659,7 @@ def build_final_table(img: np.ndarray):
         limit = 1 + max(MIN_EXPECTED_QUESTION_COLS, EXPECTED_NUM_QUESTIONS or 0)
         question_col_indices = list(range(1, min(len(col_intervals), limit)))
 
-    name_col  = col_intervals[name_col_idx]
+    name_col = col_intervals[name_col_idx]
     raw_names = ocr_names(img, name_col, candidate_student_rows)
 
     student_rows, student_names = [], []
@@ -859,9 +670,7 @@ def build_final_table(img: np.ndarray):
         student_names.append(name)
 
     if len(student_rows) < MIN_EXPECTED_STUDENT_ROWS:
-        fallback      = (candidate_student_rows[-5:]
-                         if len(candidate_student_rows) >= 5
-                         else candidate_student_rows)
+        fallback = candidate_student_rows[-5:] if len(candidate_student_rows) >= 5 else candidate_student_rows
         student_rows  = fallback
         student_names = raw_names[-len(fallback):]
 
@@ -924,8 +733,7 @@ def build_final_table(img: np.ndarray):
 
     records, conf_records, density_records = [], [], []
 
-    for row_i, ((y1, y2), student_name) in enumerate(
-            zip(student_rows, student_names)):
+    for row_i, ((y1, y2), student_name) in enumerate(zip(student_rows, student_names)):
         rec   = {"Nome": student_name}
         c_rec = {"Nome": student_name}
         d_rec = {"Nome": student_name}
@@ -934,8 +742,10 @@ def build_final_table(img: np.ndarray):
             x1, x2 = col_intervals[col_idx]
             q_name  = final_question_headers[q_pos]
             cell    = crop(img, x1, y1, x2, y2, pad=4)
-            debug_name = f"row{row_i+1}_{q_name}" if ENABLE_DEBUG_IMAGES else None
-            result  = detect_filled_option_v4(cell, debug_name=debug_name)
+
+            # usa a versão v4 corrigida
+            result  = detect_filled_option_v4(cell, debug_name=f"row{row_i+1}_{q_name}")
+
             rec[q_name]   = result.label if result.label is not None else ""
             c_rec[q_name] = round(result.confidence, 3)
             d_rec[q_name] = round(result.density, 3)
@@ -944,21 +754,16 @@ def build_final_table(img: np.ndarray):
         conf_records.append(c_rec)
         density_records.append(d_rec)
 
-    df         = pd.DataFrame(records)
-    df_conf    = pd.DataFrame(conf_records)
-    df_density = pd.DataFrame(density_records)
+    df          = pd.DataFrame(records)
+    df_conf     = pd.DataFrame(conf_records)
+    df_density  = pd.DataFrame(density_records)
 
     return df, df_conf, df_density, {
-        "headers_raw":              headers,
-        "question_columns":         question_col_indices,
-        "question_headers_final":   final_question_headers,
-        "student_names":            student_names,
+        "headers_raw": headers,
+        "question_columns": question_col_indices,
+        "question_headers_final": final_question_headers,
+        "student_names": student_names
     }
-
-
-# ============================================================
-# MAIN com cProfile + relatório por função
-# ============================================================
 
 def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bool:
     """
@@ -1033,7 +838,7 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
         return
 
     print(f"\n{'='*60}")
-    print(f"PROCESSAMENTO EM LOTE (PROFILING)")
+    print(f"PROCESSAMENTO EM LOTE")
     print(f"{'='*60}")
     print(f"Pasta de entrada: {input_folder}")
     print(f"Pasta de saída:   {output_dir}")
@@ -1043,7 +848,6 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     results = []
     successful = 0
     failed = 0
-    total_time = 0
 
     for i, image_file in enumerate(image_files, 1):
         print(f"[{i}/{len(image_files)}] Processando: {image_file.name}")
@@ -1057,51 +861,41 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
         output_csv = str(image_output_dir / "resultado.csv")
         debug_dir = str(image_output_dir / "debug")
         
-        # Processa a imagem com timing
-        start_time = time.perf_counter()
+        # Processa a imagem
         success = process_single_image(str(image_file), output_csv, debug_dir)
-        elapsed = time.perf_counter() - start_time
-        total_time += elapsed
         
         results.append({
             'file': image_file.name,
             'success': success,
-            'time_ms': elapsed * 1000,
             'output_dir': str(image_output_dir)
         })
         
         if success:
             successful += 1
-            print(f"    - Tempo: {elapsed*1000:.0f} ms")
         else:
             failed += 1
         print()
 
     # Gera resumo
-    avg_time = total_time / len(image_files) if image_files else 0
     print(f"{'='*60}")
     print(f"RESUMO DO PROCESSAMENTO")
     print(f"{'='*60}")
     print(f"Total processado: {len(image_files)}")
     print(f"Sucesso:          {successful} ({successful/len(image_files)*100:.1f}%)")
     print(f"Falhas:           {failed} ({failed/len(image_files)*100:.1f}%)")
-    print(f"Tempo total:      {total_time:.2f}s")
-    print(f"Tempo médio:      {avg_time*1000:.0f} ms/imagem")
     print(f"{'='*60}\n")
 
     # Salva resumo em arquivo
     summary_file = output_path / "summary.txt"
     with open(summary_file, 'w', encoding='utf-8') as f:
-        f.write(f"RESUMO DO PROCESSAMENTO EM LOTE (PROFILING)\n")
+        f.write(f"RESUMO DO PROCESSAMENTO EM LOTE\n")
         f.write(f"{'='*60}\n")
         f.write(f"Data: {pd.Timestamp.now()}\n")
         f.write(f"Pasta de entrada: {input_folder}\n")
         f.write(f"Pasta de saída: {output_dir}\n\n")
         f.write(f"Total processado: {len(image_files)}\n")
         f.write(f"Sucesso: {successful}\n")
-        f.write(f"Falhas: {failed}\n")
-        f.write(f"Tempo total: {total_time:.2f}s\n")
-        f.write(f"Tempo médio: {avg_time*1000:.0f} ms/imagem\n\n")
+        f.write(f"Falhas: {failed}\n\n")
         f.write(f"{'='*60}\n")
         f.write(f"DETALHES POR IMAGEM\n")
         f.write(f"{'='*60}\n\n")
@@ -1109,8 +903,6 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
         for result in results:
             status = "✓ SUCESSO" if result['success'] else "✗ FALHA"
             f.write(f"{status}: {result['file']}\n")
-            if result['success']:
-                f.write(f"  Tempo: {result['time_ms']:.0f} ms\n")
             f.write(f"  Saída: {result['output_dir']}\n\n")
 
     print(f"Resumo salvo em: {summary_file}")
@@ -1120,51 +912,12 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
 def main():
     img = cv2.imread(IMAGE_PATH)
     if img is None:
-        raise FileNotFoundError(
-            f"Não foi possível abrir a imagem: {IMAGE_PATH}")
+        raise FileNotFoundError(f"Não foi possível abrir a imagem: {IMAGE_PATH}")
 
-    # ── cProfile: captura tudo (inclusive OpenCV e Tesseract internos)
-    profiler = cProfile.Profile()
-    profiler.enable()
-
-    t_total_start = time.perf_counter()
     pre = preprocess_document(img)
     df, df_conf, df_density, meta = build_final_table(pre)
-    t_total_end = time.perf_counter()
 
-    profiler.disable()
-
-    # ── Salva CSVs de resultado
-    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    conf_path    = OUTPUT_CSV.replace(".csv", "_confianca.csv")
-    density_path = OUTPUT_CSV.replace(".csv", "_densidade.csv")
-    df_conf.to_csv(conf_path,    index=False, encoding="utf-8-sig")
-    df_density.to_csv(density_path, index=False, encoding="utf-8-sig")
-
-    # ── Relatório do decorator (wall-time por função)
-    print_profile_report()
-
-    # ── Relatório cProfile (top 30 por tempo cumulativo)
-    print("\n" + "=" * 78)
-    print("  RELATÓRIO cProfile — top 30 funções por tempo cumulativo")
-    print("=" * 78)
-    stream = io.StringIO()
-    ps = pstats.Stats(profiler, stream=stream)
-    ps.sort_stats("cumulative")
-    ps.print_stats(30)
-    print(stream.getvalue())
-
-    # Salva cProfile completo
-    profiler.dump_stats("profile_cprofile.prof")
-    print("→ Arquivo .prof salvo em profile_cprofile.prof")
-    print(f"  (abra com: python -m snakeviz profile_cprofile.prof)")
-
-    # ── Tempo total
-    print(f"\n  Tempo total de execução: "
-          f"{(t_total_end - t_total_start)*1000:.0f} ms\n")
-
-    # ── Resultados
-    print("Cabeçalhos OCR brutos:")
+    print("\nCabeçalhos OCR brutos:")
     print(meta["headers_raw"])
     print("\nCabeçalhos finais de questões:")
     print(meta["question_headers_final"])
@@ -1174,11 +927,16 @@ def main():
     print("\nTabela extraída:")
     print(df.to_string(index=False))
 
-    print(f"\nCSV principal:  {OUTPUT_CSV}")
-    print(f"CSV confiança:  {conf_path}")
-    print(f"CSV densidade:  {density_path}")
-    print(f"Debug:          {DEBUG_DIR}/")
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    conf_path    = OUTPUT_CSV.replace(".csv", "_confianca.csv")
+    density_path = OUTPUT_CSV.replace(".csv", "_densidade.csv")
+    df_conf.to_csv(conf_path, index=False, encoding="utf-8-sig")
+    df_density.to_csv(density_path, index=False, encoding="utf-8-sig")
 
+    print(f"\nCSV principal salvo em:   {OUTPUT_CSV}")
+    print(f"CSV de confiança salvo em: {conf_path}")
+    print(f"CSV de densidade salvo em: {density_path}")
+    print(f"Debug salvo em:            {DEBUG_DIR}")
 
 if __name__ == "__main__":
     main()
