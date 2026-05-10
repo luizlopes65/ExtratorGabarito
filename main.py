@@ -17,7 +17,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run standard version on single image (default)
+  # Run QR-based version on single image (default)
   python main.py
   
   # Process all images in a folder
@@ -31,6 +31,9 @@ Examples:
   
   # Specify custom output directory for batch
   python main.py --batch examples/ --output-dir resultados/batch_run/
+  
+  # Provide QR data directly (for testing)
+  python main.py --qr-data "1;2;3.Student1;Student2;Student3"
         """
     )
     
@@ -71,6 +74,12 @@ Examples:
         help='Enable debug image generation (profiling version only)'
     )
     
+    parser.add_argument(
+        '--qr-data',
+        type=str,
+        help='QR code data string (format: "q1;q2;q3.student1;student2;student3")'
+    )
+    
     args = parser.parse_args()
     
     # Validate arguments
@@ -87,8 +96,8 @@ Examples:
             extractor.ENABLE_DEBUG_IMAGES = True
             extractor.PROFILE_DETAILED = True
     else:
-        print("Running standard version...")
-        import extrair_table_fixed as extractor
+        print("Running QR-based version...")
+        import extrair_table_qr as extractor
     
     # Run batch or single processing
     try:
@@ -109,12 +118,21 @@ Examples:
             if args.output:
                 extractor.OUTPUT_CSV = args.output
             
+            # Set QR data if provided (only for QR version)
+            if args.qr_data and not args.profile:
+                extractor.QR_DATA = args.qr_data
+                print(f"Using provided QR data: {args.qr_data[:50]}...")
+            
             # Verify input file exists
             if not Path(extractor.IMAGE_PATH).exists():
                 print(f"Error: Image file not found: {extractor.IMAGE_PATH}", file=sys.stderr)
                 sys.exit(1)
             
-            extractor.main()
+            # Call main with qr_data parameter for QR version
+            if not args.profile and hasattr(extractor, 'QR_DATA'):
+                extractor.main(qr_data=extractor.QR_DATA)
+            else:
+                extractor.main()
             
     except Exception as e:
         print(f"Error during extraction: {e}", file=sys.stderr)
