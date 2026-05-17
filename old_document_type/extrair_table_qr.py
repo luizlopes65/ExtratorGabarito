@@ -7,22 +7,27 @@ import shutil
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+from pyzbar import pyzbar
 
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
 
-IMAGE_PATH = "examples/subtest/digitalizada.jpeg"
-OUTPUT_CSV = "resultados/resultado_gabarito_v4.csv"
-DEBUG_DIR = "debug/debug_gabarito_v4"
+IMAGE_PATH = "examples/page_002.png"
+OUTPUT_CSV = "resultados/resultado_gabarito_qr.csv"
+DEBUG_DIR = "debug/debug_gabarito_qr"
 
 TESSERACT_CMD = r"/opt/homebrew/bin/tesseract"
 
 OCR_LANG = "por+eng"
 
+# QR code data (can be set externally via main.py)
+# Placeholder QR data for testing (format: "q1;q2;q3.student1;student2;student3")
+QR_DATA = "1;2;3;4;5;6;7;8;9;10.João Silva;Maria Santos;Pedro Oliveira;Ana Costa;Carlos Souza"
+
 OPTION_LABELS = ["B", "1", "2", "3"]
 
-MIN_EXPECTED_QUESTION_COLS = 8
+MIN_EXPECTED_QUESTION_COLS = 5
 MIN_EXPECTED_STUDENT_ROWS = 3
 
 GRID_CLUSTER_TOLERANCE = 12
@@ -34,14 +39,14 @@ EXPECTED_NUM_QUESTIONS = None
 
 EXPECTED_QUESTION_HEADERS = []
 
-MIN_FILL_DENSITY = 0.05
+MIN_FILL_DENSITY = 0.03
 MIN_INNER_DIFF = 5
 MAX_SECOND_RATIO = 0.65
 
 
-NARROW_COL_RATIO = 0.40   # drop if width < median_width * this
+NARROW_COL_RATIO: float = 0.40   # drop if width < median_width * this
 
-WIDE_NAME_COL_RATIO = 1.5  # name col width >= median * this (informational)
+WIDE_NAME_COL_RATIO: float = 1.5  # name col width >= median * this (informational)
 
 # ============================================================
 # ESTRUTURAS
@@ -555,7 +560,244 @@ def reconcile_question_headers(question_headers: List[str],
 # IDENTIFICAÇÃO DE REGIÕES
 # ============================================================
 
+# ============================================================
+# QR CODE DETECTION AND PARSING
+# ============================================================
+
+def detect_qr_code(img: np.ndarray) -> Optional[str]:
+    """
+    Detect and decode QR code from the top-left corner of the image.
+    Uses multiple preprocessing techniques for robust detection.
+    Enhanced with additional methods from teste_qr_extraction.py
+    
+    Returns:
+        QR code data as string, or None if not found
+    """
+    # Try multiple region sizes (30%, 40%, 50%)
+    h, w = img.shape[:2]
+    regions_to_try = [
+        ("Top-Left 30%", img[0:int(h*0.3), 0:int(w*0.3)]),
+        ("Top-Left 40%", img[0:int(h*0.4), 0:int(w*0.4)]),
+        ("Top-Left 50%", img[0:int(h*0.5), 0:int(w*0.5)]),
+    ]
+    
+    for region_name, qr_region in regions_to_try:
+        # Convert to grayscale for preprocessing
+        if len(qr_region.shape) == 3:
+            gray_region = cv2.cvtColor(qr_region, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_region = qr_region
+        
+        # Try multiple preprocessing techniques (from teste_qr_extraction.py)
+        # IMPORTANT: Try original color image first, as pyzbar works best with it
+        preprocessing_methods = [
+            ("Original", qr_region),  # Try color image first
+            ("Grayscale", gray_region),
+            ("Binary Threshold", cv2.threshold(gray_region, 127, 255, cv2.THRESH_BINARY)[1]),
+            ("Adaptive Threshold", cv2.adaptiveThreshold(gray_region, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)),
+            ("Otsu Threshold", cv2.threshold(gray_region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]),
+            ("Inverted", cv2.bitwise_not(gray_region)),
+            ("Contrast Enhanced", cv2.equalizeHist(gray_region)),
+        ]
+    
+        qr_codes = None
+        successful_method = None
+        
+        for method_name, processed in preprocessing_methods:
+            qr_codes = pyzbar.decode(processed)
+            if qr_codes:
+                successful_method = method_name
+                break
+        
+        if qr_codes:
+            qr_data = qr_codes[0].data.decode('utf-8')
+            print(f"[QR] Detected QR code in {region_name} using {successful_method}: {qr_data}")
+            
+            # Save debug image showing QR detection
+            if len(qr_region.shape) == 3:
+                qr_debug = qr_region.copy()
+            else:
+                qr_debug = cv2.cvtColor(qr_region.copy(), cv2.COLOR_GRAY2BGR)
+            for qr in qr_codes:
+                points = qr.polygon
+                if len(points) == 4:
+                    pts = np.array([[p.x, p.y] for p in points], dtype=np.int32)
+                    cv2.polylines(qr_debug, [pts], True, (0, 255, 0), 3)
+            save_debug("qr_code_detected.png", qr_debug)
+            
+            return qr_data
+    
+    print("[QR] No QR code detected in any region (tried 30%, 40%, 50%)")
+    return None
+
+
+def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Parse QR code data to extract question numbers and student IDs.
+    
+    Expected format (new):
+    "F;P217;E25;Primeiro;Primeiro;2026_04_13;1,2,3,47,5,6A,6B;A3859,A3860,A3861,...;2"
+    
+    Format breakdown:
+    - Fields 0-5: Metadata/garbage (F, P217, E25, Primeiro, Primeiro, 2026_04_13)
+    - Field 6: Questions (comma-separated: 1,2,3,47,5,6A,6B)
+    - Field 7: Student IDs (comma-separated: A3859,A3860,A3861,...)
+    - Field 8: Garbage (2)
+    
+    Legacy format (fallback):
+    "question1;question2;question3.student1;student2;student3"
+    
+    Args:
+        qr_data: Raw QR code string
+        
+    Returns:
+        Tuple of (question_headers, student_ids, student_names)
+        Note: student_names will be empty list for new format (IDs only)
+    """
+    try:
+        # Try new format first (semicolon-separated fields)
+        if ';' in qr_data and ',' in qr_data:
+            parts = qr_data.split(';')
+            
+            # New format should have at least 8 fields
+            if len(parts) >= 8:
+                # Field 6: Questions (comma-separated)
+                questions_str = parts[6].strip()
+                questions = [q.strip() for q in questions_str.split(',') if q.strip()]
+                
+                # Field 7: Student IDs (comma-separated)
+                ids_str = parts[7].strip()
+                student_ids = [sid.strip() for sid in ids_str.split(',') if sid.strip()]
+                
+                print(f"[QR Parse] New format detected")
+                print(f"[QR Parse] Metadata fields: {parts[0:6]}")
+                print(f"[QR Parse] Extracted {len(questions)} questions: {questions}")
+                print(f"[QR Parse] Extracted {len(student_ids)} student IDs: {student_ids}")
+                if len(parts) > 8:
+                    print(f"[QR Parse] Ignored trailing field: {parts[8]}")
+                
+                # Return empty list for student names (we only have IDs)
+                return questions, student_ids, []
+        
+        # Fallback to legacy format: "questions.students"
+        if '.' in qr_data:
+            parts = qr_data.split('.', 1)
+            
+            if len(parts) != 2:
+                print(f"[QR Parse] Invalid legacy format: expected 'questions.students', got: {qr_data}")
+                return [], [], []
+            
+            questions_str, students_str = parts
+            
+            # Parse questions (separated by ;)
+            questions = [q.strip() for q in questions_str.split(';') if q.strip()]
+            
+            # Parse student names (separated by ;)
+            students = [s.strip() for s in students_str.split(';') if s.strip()]
+            
+            print(f"[QR Parse] Legacy format detected")
+            print(f"[QR Parse] Extracted {len(questions)} questions: {questions}")
+            print(f"[QR Parse] Extracted {len(students)} students: {students}")
+            
+            # Return empty list for IDs (legacy format doesn't have them)
+            return questions, [], students
+        
+        print(f"[QR Parse] Unrecognized format: {qr_data}")
+        return [], [], []
+        
+    except Exception as e:
+        print(f"[QR Parse] Error parsing QR data: {e}")
+        import traceback
+        traceback.print_exc()
+        return [], [], []
+
+
+def get_qr_headers(img, col_intervals, header_row, qr_questions: List[str]) -> List[str]:
+    """
+    Generate headers for columns based on QR code data.
+    
+    Args:
+        img: Image (unused, kept for compatibility)
+        col_intervals: List of column intervals
+        header_row: Header row interval (unused, kept for compatibility)
+        qr_questions: List of question numbers from QR code
+        
+    Returns:
+        List of headers matching column count
+    """
+    headers = []
+    
+    # First column is always the name column (empty header)
+    headers.append("")
+    
+    # Remaining columns are question columns
+    for idx in range(1, len(col_intervals)):
+        if idx - 1 < len(qr_questions):
+            headers.append(qr_questions[idx - 1])
+        else:
+            # If we run out of QR questions, generate placeholder
+            headers.append(f"Q{idx}")
+    
+    print(f"[QR Headers] Generated {len(headers)} headers: {headers}")
+    
+    # Save debug visualization
+    y1, y2 = header_row
+    for idx, (x1, x2) in enumerate(col_intervals):
+        cell = crop(img, x1, y1, x2, y2, pad=3)
+        if cell is not None:
+            vis = cv2.cvtColor(cell.copy(), cv2.COLOR_GRAY2BGR) if len(cell.shape) == 2 else cell.copy()
+            text = headers[idx] if idx < len(headers) else ""
+            cv2.putText(vis, text, (5, min(20, vis.shape[0]-5)),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+            save_debug(f"header_col_{idx+1}_qr.png", vis)
+    
+    return headers
+
+
+def get_qr_names(img, name_col, candidate_rows, qr_students: List[str]) -> List[str]:
+    """
+    Generate student names for rows based on QR code data.
+    
+    Args:
+        img: Image (unused, kept for compatibility)
+        name_col: Name column interval (unused, kept for compatibility)
+        candidate_rows: List of row intervals
+        qr_students: List of student names from QR code
+        
+    Returns:
+        List of student names matching row count
+    """
+    names = []
+    
+    for i, (y1, y2) in enumerate(candidate_rows):
+        if i < len(qr_students):
+            names.append(qr_students[i])
+        else:
+            # If we run out of QR students, use placeholder
+            names.append(f"Student_{i+1}")
+    
+    print(f"[QR Names] Generated {len(names)} names: {names}")
+    
+    # Save debug visualization
+    x1, x2 = name_col
+    for i, (y1, y2) in enumerate(candidate_rows):
+        cell = crop(img, x1, y1, x2, y2, pad=4)
+        if cell is not None:
+            vis = cv2.cvtColor(cell.copy(), cv2.COLOR_GRAY2BGR) if len(cell.shape) == 2 else cell.copy()
+            text = names[i] if i < len(names) else ""
+            cv2.putText(vis, (text or "(vazio)")[:40], (5, min(20, vis.shape[0]-5)),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+            save_debug(f"name_row_{i+1}_qr.png", vis)
+    
+    return names
+
+
+# ============================================================
+# LEGACY OCR FUNCTIONS (kept for reference/fallback)
+# ============================================================
+
 def ocr_headers(img, col_intervals, header_row, expected_headers: Optional[List[str]] = None):
+    """LEGACY: OCR-based header extraction (replaced by QR code)"""
     y1, y2 = header_row
     headers = []
     for idx, (x1, x2) in enumerate(col_intervals):
@@ -572,6 +814,7 @@ def ocr_headers(img, col_intervals, header_row, expected_headers: Optional[List[
     return headers
 
 def ocr_names(img, name_col, candidate_rows):
+    """LEGACY: OCR-based name extraction (replaced by QR code)"""
     names = []
     x1, x2 = name_col
     for i, (y1, y2) in enumerate(candidate_rows):
@@ -862,7 +1105,15 @@ def choose_question_columns(headers, col_intervals):
         question_cols = [i for i in range(len(col_intervals)) if i != name_col_idx]
     return name_col_idx, question_cols
 
-def build_final_table(img: np.ndarray):
+def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
+    """
+    Build the final extraction table.
+    
+    Args:
+        img: Preprocessed image
+        qr_data: Optional QR code data. If provided, uses QR-based extraction.
+                If None, attempts to detect QR code automatically.
+    """
     xs, ys, col_intervals, row_intervals = get_table_structure(img)
 
     if len(col_intervals) < 2:
@@ -875,7 +1126,43 @@ def build_final_table(img: np.ndarray):
     if header_row is None:
         raise RuntimeError("Não foi possível identificar a linha de cabeçalho.")
 
-    headers = ocr_headers(img, col_intervals, header_row, EXPECTED_QUESTION_HEADERS)
+    # ============================================================
+    # QR CODE EXTRACTION MODE
+    # ============================================================
+    
+    # Try to detect QR code if not provided
+    if qr_data is None:
+        qr_data = detect_qr_code(img)
+    
+    # Parse QR data if available
+    qr_questions = []
+    qr_ids = []
+    qr_students = []
+    use_qr_mode = False
+    
+    if qr_data:
+        qr_questions, qr_ids, qr_students = parse_qr_data(qr_data)
+        # New format: has questions and IDs (no names)
+        # Legacy format: has questions and names (no IDs)
+        if qr_questions and (qr_ids or qr_students):
+            use_qr_mode = True
+            if qr_ids:
+                print(f"[QR Mode] Using QR code data (new format): {len(qr_questions)} questions, {len(qr_ids)} student IDs")
+            else:
+                print(f"[QR Mode] Using QR code data (legacy format): {len(qr_questions)} questions, {len(qr_students)} students")
+        else:
+            print("[QR Mode] QR data parsing failed, falling back to OCR mode")
+    else:
+        print("[QR Mode] No QR code detected, falling back to OCR mode")
+    
+    # Extract headers using QR or OCR
+    if use_qr_mode:
+        # QR mode: Build headers directly from QR data (no OCR needed)
+        headers = ["Nome/ID"] + qr_questions
+        print(f"[QR Mode] Headers from QR code (no OCR): {headers}")
+    else:
+        headers = ocr_headers(img, col_intervals, header_row, EXPECTED_QUESTION_HEADERS)
+    
     name_col_idx, question_col_indices = choose_question_columns(headers, col_intervals)
 
     if not EXPECTED_QUESTION_HEADERS:
@@ -909,8 +1196,13 @@ def build_final_table(img: np.ndarray):
             question_col_indices = [
                 old_to_new[i] for i in question_col_indices if i in old_to_new
             ]
-            # Re-run header OCR on the pruned column set
-            headers = ocr_headers(img, col_intervals, header_row, EXPECTED_QUESTION_HEADERS)
+            # Re-run header extraction on the pruned column set
+            if use_qr_mode:
+                # QR mode: Rebuild headers directly from QR data (no OCR)
+                headers = ["Nome/ID"] + qr_questions[:len(col_intervals)-1]
+                print(f"[QR Mode] Rebuilt headers after pruning (no OCR): {headers}")
+            else:
+                headers = ocr_headers(img, col_intervals, header_row, EXPECTED_QUESTION_HEADERS)
             # Re-derive question columns from fresh headers
             name_col_idx, question_col_indices = choose_question_columns(headers, col_intervals)
             if not EXPECTED_QUESTION_HEADERS:
@@ -935,22 +1227,43 @@ def build_final_table(img: np.ndarray):
     for i, (y1, y2) in enumerate(candidate_student_rows):
         print(f"  candidate {i}: y=({y1},{y2}) h={y2-y1}")
 
-    raw_names = ocr_names(img, name_col, candidate_student_rows)
+    # Extract student IDs/names using QR or OCR
+    student_rows, student_ids, student_names = [], [], []
+    
+    if use_qr_mode:
+        # QR mode: Use data directly from QR code (no OCR needed)
+        if qr_ids:
+            # New format: use IDs from QR code
+            num_students = len(qr_ids)
+            student_rows = candidate_student_rows[:num_students]
+            student_ids = qr_ids[:num_students]
+            student_names = [""] * num_students  # No names in new format, only IDs
+            print(f"[QR Mode] Using {len(student_ids)} student IDs from QR code (no OCR)")
+        else:
+            # Legacy format: use names from QR code
+            num_students = len(qr_students)
+            student_rows = candidate_student_rows[:num_students]
+            student_ids = []  # No IDs in legacy format
+            student_names = qr_students[:num_students]
+            print(f"[QR Mode] Using {len(student_names)} student names from QR code (no OCR, legacy)")
+    else:
+        # OCR mode: filter names as before
+        raw_names = ocr_names(img, name_col, candidate_student_rows)
+        for interval, name in zip(candidate_student_rows, raw_names):
+            y1, y2 = interval
+            print(f"  [filter] y=({y1},{y2}) h={y2-y1}  name={name!r}  "
+                  f"→ {'KEEP' if name and name != '__TOTAL__' and len(name) >= 3 else 'DROP'}")
+            if not name or name == "__TOTAL__" or len(name) < 3:
+                continue
+            student_rows.append(interval)
+            student_ids.append("")  # No IDs in OCR mode
+            student_names.append(name)
 
-    student_rows, student_names = [], []
-    for interval, name in zip(candidate_student_rows, raw_names):
-        y1, y2 = interval
-        print(f"  [filter] y=({y1},{y2}) h={y2-y1}  name={name!r}  "
-              f"→ {'KEEP' if name and name != '__TOTAL__' and len(name) >= 3 else 'DROP'}")
-        if not name or name == "__TOTAL__" or len(name) < 3:
-            continue
-        student_rows.append(interval)
-        student_names.append(name)
-
-    if len(student_rows) < MIN_EXPECTED_STUDENT_ROWS:
-        fallback = candidate_student_rows[-5:] if len(candidate_student_rows) >= 5 else candidate_student_rows
-        student_rows  = fallback
-        student_names = raw_names[-len(fallback):]
+        if len(student_rows) < MIN_EXPECTED_STUDENT_ROWS:
+            fallback = candidate_student_rows[-5:] if len(candidate_student_rows) >= 5 else candidate_student_rows
+            student_rows  = fallback
+            student_ids = [""] * len(fallback)
+            student_names = raw_names[-len(fallback):]
 
     question_headers = []
     for idx in question_col_indices:
@@ -980,12 +1293,20 @@ def build_final_table(img: np.ndarray):
 
     print(f"\n[build] student_rows intervals:")
     for i, (y1, y2) in enumerate(student_rows):
-        print(f"  row{i+1}: y=({y1},{y2}) h={y2-y1}  name={student_names[i]!r}")
+        id_str = f"ID={student_ids[i]!r}" if (student_ids and i < len(student_ids) and student_ids[i]) else ""
+        name_str = f"name={student_names[i]!r}" if i < len(student_names) else ""
+        print(f"  row{i+1}: y=({y1},{y2}) h={y2-y1}  {id_str} {name_str}")
 
-    for row_i, ((y1, y2), student_name) in enumerate(zip(student_rows, student_names)):
-        rec   = {"Nome": student_name}
-        c_rec = {"Nome": student_name}
-        d_rec = {"Nome": student_name}
+    for row_i, ((y1, y2), student_id, student_name) in enumerate(zip(student_rows, student_ids, student_names)):
+        # Include ID column if we have IDs (new format), or Nome column if we have names (legacy/OCR)
+        if student_id:
+            rec   = {"ID": student_id}
+            c_rec = {"ID": student_id}
+            d_rec = {"ID": student_id}
+        else:
+            rec   = {"Nome": student_name}
+            c_rec = {"Nome": student_name}
+            d_rec = {"Nome": student_name}
 
         # Debug: save the full student row so we can see what region is being scanned
         if y2 <= y1:
@@ -1068,8 +1389,11 @@ def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bo
         DEBUG_DIR = debug_dir
         clear_debug_dir(DEBUG_DIR)
 
+        # Detect QR code BEFORE preprocessing to avoid distortion
+        qr_data = detect_qr_code(img)
+        
         pre = preprocess_document(img)
-        df, df_conf, df_density, meta = build_final_table(pre)
+        df, df_conf, df_density, meta = build_final_table(pre, qr_data=qr_data)
 
         Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_csv, index=False, encoding="utf-8-sig")
@@ -1142,23 +1466,32 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     print(f"Resumo salvo em: {summary_file}")
 
 
-def main():
+def main(qr_data: Optional[str] = None):
+    """
+    Main extraction function.
+    
+    Args:
+        qr_data: Optional QR code data string. If None, auto-detects QR code from image.
+                If auto-detection fails, falls back to global QR_DATA placeholder.
+    """
     clear_debug_dir(DEBUG_DIR)
 
     img = cv2.imread(IMAGE_PATH)
     if img is None:
         raise FileNotFoundError(f"Não foi possível abrir a imagem: {IMAGE_PATH}")
 
+    # Detect QR code BEFORE preprocessing to avoid distortion
+    if qr_data is None:
+        qr_data = detect_qr_code(img)
+    
     pre = preprocess_document(img)
-    df, df_conf, df_density, meta = build_final_table(pre)
+    
+    # Pass the detected QR data to build_final_table
+    df, df_conf, df_density, meta = build_final_table(pre, qr_data=qr_data)
 
-    print("\nCabeçalhos OCR brutos:")
-    print(meta["headers_raw"])
+
     print("\nCabeçalhos finais de questões:")
     print(meta["question_headers_final"])
-    print("\nNomes detectados:")
-    for n in meta["student_names"]:
-        print("-", n)
     print("\nTabela extraída:")
     print(df.to_string(index=False))
 

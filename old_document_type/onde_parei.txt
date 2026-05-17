@@ -1,0 +1,8 @@
+Problemas:
+Os exemplos vem em PDFs e tem várias pags juntas. O QRCode parece
+carregar infos de uma pag pra outra. Como as infos virão para mim de fato?
+E o QRCode pode ser adaptado?
+
+O heatmap tem algumas questão.
+Tenho perguntas que possuem A ou B nos exemplos, mas não tem A ou B no banco.
+Tem questões sem subtipo.
