@@ -1,0 +1,4 @@
+pasta/
+debug_batch/
+*.pyc
+__pycache__/
