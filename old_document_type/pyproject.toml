@@ -20,6 +20,7 @@ pydantic = "^2.12.5"
 pytesseract = "^0.3.13"
 pyzbar = "^0.1.9"
 pdf2image = "^1.17.0"
+gspread = "^6.2.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

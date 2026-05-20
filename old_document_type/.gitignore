@@ -37,3 +37,7 @@ env/
 Thumbs.db
 
 /archive
+
+credenciais.json
+
+my_results/

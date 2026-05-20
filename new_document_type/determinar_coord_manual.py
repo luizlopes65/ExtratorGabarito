@@ -231,4 +231,4 @@ if __name__ == "__main__":
     app = AnotadorDeCaixas(root)
     root.mainloop()
 
-# Made with Bob
+ 

@@ -62,4 +62,4 @@ if __name__ == "__main__":
     
     convert_pdf_to_pngs(pdf_path)
 
-# Made with Bob
+ 

@@ -8,6 +8,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from pyzbar import pyzbar
+import json
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -218,15 +219,22 @@ def extract_line_positions(line_img: np.ndarray, axis: str) -> List[int]:
 # FIX 1: Filter spurious margin columns
 # ============================================================
 
-def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int) -> List[Tuple[int, int]]:
+def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int, expected_col_count: int = 0) -> List[Tuple[int, int]]:
     """
     Remove columns that are artifacts of vertical margin text (URL, watermark, etc.).
 
     Strategy:
     1. Compute the median column width among all intervals.
     2. Drop any column narrower than NARROW_COL_RATIO * median_width.
-    3. Also drop columns whose centre is in the outermost 4% of the image width,
+    3. Also drop columns whose centre is in the outermost margin of the image width,
        which is where rotated margin text typically lives.
+    4. If expected_col_count is provided (from QR code), preserve that many columns
+       even if they're in the margin area.
+    
+    Args:
+        col_intervals: List of (x1, x2) tuples representing column boundaries
+        img_width: Width of the image in pixels
+        expected_col_count: Expected number of columns from QR code (0 = not provided)
     """
     if not col_intervals:
         return col_intervals
@@ -235,7 +243,8 @@ def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int) 
     median_w = float(np.median(widths))
     min_w = NARROW_COL_RATIO * median_w
 
-    margin_px = int(img_width * 0.03)  # outermost 3% on each side (reduced from 7% to avoid filtering valid columns)
+    # Reduce margin to 1.5% to avoid filtering valid rightmost columns
+    margin_px = int(img_width * 0.015)
 
     filtered = []
     for x1, x2 in col_intervals:
@@ -248,6 +257,12 @@ def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int) 
             print(f"  [filter_cols] Dropping margin column x={x1}-{x2} (cx={cx:.0f})")
             continue
         filtered.append((x1, x2))
+
+    # If we have expected column count from QR and we filtered too many, keep the original
+    if expected_col_count > 0 and len(filtered) < expected_col_count:
+        print(f"  [filter_cols] WARNING: Filtered to {len(filtered)} columns but QR expects {expected_col_count}")
+        print(f"  [filter_cols] Reverting to original {len(col_intervals)} columns to preserve QR data")
+        return col_intervals
 
     if not filtered:
         print("  [filter_cols] WARNING: all columns were filtered — reverting to original")
@@ -332,7 +347,15 @@ def identify_header_and_student_rows(img, row_intervals):
 # Main grid structure (uses both fixes)
 # ============================================================
 
-def get_table_structure(img: np.ndarray):
+def get_table_structure(img: np.ndarray, expected_question_count: int = 0):
+    """
+    Extract table structure from image.
+    
+    Args:
+        img: Input image
+        expected_question_count: Expected number of question columns from QR code (0 = unknown)
+                                This helps preserve rightmost columns that might otherwise be filtered
+    """
     gray = to_gray(img)
     bw = binarize_for_grid(gray)
     vertical, horizontal = detect_grid_masks(bw)
@@ -346,7 +369,9 @@ def get_table_structure(img: np.ndarray):
     raw_col_intervals = [(xs[i], xs[i+1]) for i in range(len(xs)-1) if xs[i+1]-xs[i] >= COL_WIDTH_MIN]
 
     # ── FIX 1: remove margin/artifact columns ──
-    col_intervals = filter_margin_columns(raw_col_intervals, img.shape[1])
+    # Add 1 to expected count to account for the name/ID column
+    expected_col_count = expected_question_count + 1 if expected_question_count > 0 else 0
+    col_intervals = filter_margin_columns(raw_col_intervals, img.shape[1], expected_col_count)
 
     all_row_heights = [(ys[i], ys[i+1], ys[i+1]-ys[i]) for i in range(len(ys)-1)]
     print(f"\nAll detected row positions (y1, y2, height):")
@@ -631,18 +656,24 @@ def detect_qr_code(img: np.ndarray) -> Optional[str]:
     return None
 
 
-def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
+def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str], dict]:
     """
-    Parse QR code data to extract question numbers and student IDs.
+    Parse QR code data to extract question numbers, student IDs, and metadata.
     
     Expected format (new):
-    "F;P217;E25;Primeiro;Primeiro;2026_04_13;1,2,3,47,5,6A,6B;A3859,A3860,A3861,...;2"
+    "F;ID_PROF;ID_ESCOLA;ANO_ESCOLAR;BIMESTRE;DATA;QUESTÕES_DETALHADAS;IDS_ALUNOS;PÁGINA"
+    Example: "F;P217;E25;Primeiro;Primeiro;2026_04_13;1,2,3,47,5,6A,6B;A3859,A3860,A3861,...;2"
     
     Format breakdown:
-    - Fields 0-5: Metadata/garbage (F, P217, E25, Primeiro, Primeiro, 2026_04_13)
-    - Field 6: Questions (comma-separated: 1,2,3,47,5,6A,6B)
-    - Field 7: Student IDs (comma-separated: A3859,A3860,A3861,...)
-    - Field 8: Garbage (2)
+    - Field 0: Type (F)
+    - Field 1: ID_PROF (Professor ID)
+    - Field 2: ID_ESCOLA (School ID)
+    - Field 3: ANO_ESCOLAR (School year)
+    - Field 4: BIMESTRE (Bimester)
+    - Field 5: DATA (Date)
+    - Field 6: QUESTÕES_DETALHADAS (Questions, comma-separated)
+    - Field 7: IDS_ALUNOS (Student IDs, comma-separated)
+    - Field 8: PÁGINA (Page number)
     
     Legacy format (fallback):
     "question1;question2;question3.student1;student2;student3"
@@ -651,9 +682,18 @@ def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
         qr_data: Raw QR code string
         
     Returns:
-        Tuple of (question_headers, student_ids, student_names)
-        Note: student_names will be empty list for new format (IDs only)
+        Tuple of (question_headers, student_ids, student_names, metadata_dict)
+        metadata_dict contains: id_prof, id_escola, ano_escolar, bimestre, data, pagina
     """
+    metadata = {
+        'id_prof': None,
+        'id_escola': None,
+        'ano_escolar': None,
+        'bimestre': None,
+        'data': None,
+        'pagina': None
+    }
+    
     try:
         # Try new format first (semicolon-separated fields)
         if ';' in qr_data and ',' in qr_data:
@@ -661,6 +701,13 @@ def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
             
             # New format should have at least 8 fields
             if len(parts) >= 8:
+                # Extract metadata fields
+                metadata['id_prof'] = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+                metadata['id_escola'] = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+                metadata['ano_escolar'] = parts[3].strip() if len(parts) > 3 and parts[3].strip() else None
+                metadata['bimestre'] = parts[4].strip() if len(parts) > 4 and parts[4].strip() else None
+                metadata['data'] = parts[5].strip() if len(parts) > 5 and parts[5].strip() else None
+                
                 # Field 6: Questions (comma-separated)
                 questions_str = parts[6].strip()
                 questions = [q.strip() for q in questions_str.split(',') if q.strip()]
@@ -669,15 +716,22 @@ def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
                 ids_str = parts[7].strip()
                 student_ids = [sid.strip() for sid in ids_str.split(',') if sid.strip()]
                 
+                # Field 8: Page number (if exists)
+                if len(parts) > 8:
+                    metadata['pagina'] = parts[8].strip() if parts[8].strip() else None
+                
                 print(f"[QR Parse] New format detected")
-                print(f"[QR Parse] Metadata fields: {parts[0:6]}")
+                print(f"[QR Parse] ID_PROF: {metadata['id_prof']}")
+                print(f"[QR Parse] ID_ESCOLA: {metadata['id_escola']}")
+                print(f"[QR Parse] ANO_ESCOLAR: {metadata['ano_escolar']}")
+                print(f"[QR Parse] BIMESTRE: {metadata['bimestre']}")
+                print(f"[QR Parse] DATA: {metadata['data']}")
+                print(f"[QR Parse] PÁGINA: {metadata['pagina']}")
                 print(f"[QR Parse] Extracted {len(questions)} questions: {questions}")
                 print(f"[QR Parse] Extracted {len(student_ids)} student IDs: {student_ids}")
-                if len(parts) > 8:
-                    print(f"[QR Parse] Ignored trailing field: {parts[8]}")
                 
                 # Return empty list for student names (we only have IDs)
-                return questions, student_ids, []
+                return questions, student_ids, [], metadata
         
         # Fallback to legacy format: "questions.students"
         if '.' in qr_data:
@@ -685,7 +739,7 @@ def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
             
             if len(parts) != 2:
                 print(f"[QR Parse] Invalid legacy format: expected 'questions.students', got: {qr_data}")
-                return [], [], []
+                return [], [], [], metadata
             
             questions_str, students_str = parts
             
@@ -700,16 +754,16 @@ def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str]]:
             print(f"[QR Parse] Extracted {len(students)} students: {students}")
             
             # Return empty list for IDs (legacy format doesn't have them)
-            return questions, [], students
+            return questions, [], students, metadata
         
         print(f"[QR Parse] Unrecognized format: {qr_data}")
-        return [], [], []
+        return [], [], [], metadata
         
     except Exception as e:
         print(f"[QR Parse] Error parsing QR data: {e}")
         import traceback
         traceback.print_exc()
-        return [], [], []
+        return [], [], [], metadata
 
 
 def get_qr_headers(img, col_intervals, header_row, qr_questions: List[str]) -> List[str]:
@@ -1114,20 +1168,8 @@ def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
         qr_data: Optional QR code data. If provided, uses QR-based extraction.
                 If None, attempts to detect QR code automatically.
     """
-    xs, ys, col_intervals, row_intervals = get_table_structure(img)
-
-    if len(col_intervals) < 2:
-        raise RuntimeError("Não foi possível detectar colunas suficientes.")
-    if len(row_intervals) < 2:
-        raise RuntimeError("Não foi possível detectar linhas suficientes.")
-
-    # ── FIX 2: robust header detection ──
-    header_row, candidate_student_rows = identify_header_and_student_rows(img, row_intervals)
-    if header_row is None:
-        raise RuntimeError("Não foi possível identificar a linha de cabeçalho.")
-
     # ============================================================
-    # QR CODE EXTRACTION MODE
+    # QR CODE EXTRACTION MODE - DETECT FIRST
     # ============================================================
     
     # Try to detect QR code if not provided
@@ -1139,21 +1181,39 @@ def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
     qr_ids = []
     qr_students = []
     use_qr_mode = False
+    qr_metadata = {}
+    expected_question_count = 0
     
     if qr_data:
-        qr_questions, qr_ids, qr_students = parse_qr_data(qr_data)
+        qr_questions, qr_ids, qr_students, qr_metadata = parse_qr_data(qr_data)
         # New format: has questions and IDs (no names)
         # Legacy format: has questions and names (no IDs)
         if qr_questions and (qr_ids or qr_students):
             use_qr_mode = True
+            expected_question_count = len(qr_questions)
             if qr_ids:
                 print(f"[QR Mode] Using QR code data (new format): {len(qr_questions)} questions, {len(qr_ids)} student IDs")
+                print(f"[QR Metadata] ID_PROF={qr_metadata.get('id_prof')}, ID_ESCOLA={qr_metadata.get('id_escola')}, "
+                      f"ANO_ESCOLAR={qr_metadata.get('ano_escolar')}, BIMESTRE={qr_metadata.get('bimestre')}")
             else:
                 print(f"[QR Mode] Using QR code data (legacy format): {len(qr_questions)} questions, {len(qr_students)} students")
         else:
             print("[QR Mode] QR data parsing failed, falling back to OCR mode")
     else:
         print("[QR Mode] No QR code detected, falling back to OCR mode")
+    
+    # Now extract table structure with expected column count from QR
+    xs, ys, col_intervals, row_intervals = get_table_structure(img, expected_question_count)
+
+    if len(col_intervals) < 2:
+        raise RuntimeError("Não foi possível detectar colunas suficientes.")
+    if len(row_intervals) < 2:
+        raise RuntimeError("Não foi possível detectar linhas suficientes.")
+
+    # ── FIX 2: robust header detection ──
+    header_row, candidate_student_rows = identify_header_and_student_rows(img, row_intervals)
+    if header_row is None:
+        raise RuntimeError("Não foi possível identificar a linha de cabeçalho.")
     
     # Extract headers using QR or OCR
     if use_qr_mode:
@@ -1370,7 +1430,8 @@ def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
         "headers_raw": headers,
         "question_columns": question_col_indices,
         "question_headers_final": final_question_headers,
-        "student_names": student_names
+        "student_names": student_names,
+        "qr_metadata": qr_metadata
     }
 
 # ============================================================
@@ -1401,6 +1462,11 @@ def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bo
         density_path = output_csv.replace(".csv", "_densidade.csv")
         df_conf.to_csv(conf_path, index=False, encoding="utf-8-sig")
         df_density.to_csv(density_path, index=False, encoding="utf-8-sig")
+        
+        # Save QR metadata as JSON
+        metadata_path = output_csv.replace(".csv", "_metadata.json")
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(meta.get('qr_metadata', {}), f, indent=2, ensure_ascii=False)
 
         DEBUG_DIR = original_debug_dir
 
@@ -1421,26 +1487,38 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     output_path.mkdir(parents=True, exist_ok=True)
 
     image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif'}
+    pdf_extension = {'.pdf'}
+    
     image_files = [
         f for f in input_path.iterdir()
         if f.is_file() and f.suffix.lower() in image_extensions
     ]
+    
+    pdf_files = [
+        f for f in input_path.iterdir()
+        if f.is_file() and f.suffix.lower() in pdf_extension
+    ]
 
-    if not image_files:
-        print(f"Nenhuma imagem encontrada em: {input_folder}")
+    if not image_files and not pdf_files:
+        print(f"Nenhuma imagem ou PDF encontrado em: {input_folder}")
         return
+    
+    total_files = len(image_files) + len(pdf_files)
 
     print(f"\n{'='*60}")
     print(f"PROCESSAMENTO EM LOTE")
     print(f"{'='*60}")
-    print(f"Total de imagens: {len(image_files)}")
+    print(f"Total de arquivos: {total_files} ({len(image_files)} imagens, {len(pdf_files)} PDFs)")
 
     results = []
     successful = 0
     failed = 0
+    file_counter = 0
 
-    for i, image_file in enumerate(image_files, 1):
-        print(f"[{i}/{len(image_files)}] Processando: {image_file.name}")
+    # Process image files
+    for image_file in image_files:
+        file_counter += 1
+        print(f"[{file_counter}/{total_files}] Processando imagem: {image_file.name}")
         image_stem = image_file.stem
         image_output_dir = output_path / image_stem
         image_output_dir.mkdir(exist_ok=True)
@@ -1453,13 +1531,90 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
         else:
             failed += 1
         print()
+    
+    # Process PDF files
+    try:
+        from pdf_utils import pdf_to_images
+        pdf_support = True
+    except ImportError:
+        pdf_support = False
+        if pdf_files:
+            print("AVISO: pdf2image não disponível. PDFs serão ignorados.")
+    
+    if pdf_support:
+        for pdf_file in pdf_files:
+            file_counter += 1
+            print(f"[{file_counter}/{total_files}] Processando PDF: {pdf_file.name}")
+            try:
+                # Convert PDF to images
+                images = pdf_to_images(str(pdf_file))
+                print(f"  PDF contém {len(images)} página(s)")
+                
+                # Process each page
+                for page_num, img in enumerate(images, 1):
+                    pdf_stem = f"{pdf_file.stem}_page{page_num}"
+                    pdf_output_dir = output_path / pdf_stem
+                    pdf_output_dir.mkdir(exist_ok=True)
+                    
+                    # Save temporary image
+                    temp_img_path = pdf_output_dir / "temp_page.png"
+                    cv2.imwrite(str(temp_img_path), img)
+                    
+                    output_csv = str(pdf_output_dir / "resultado.csv")
+                    debug_dir = str(pdf_output_dir / "debug")
+                    
+                    print(f"    Processando página {page_num}/{len(images)}...")
+                    success = process_single_image(str(temp_img_path), output_csv, debug_dir)
+                    
+                    # Clean up temp image
+                    temp_img_path.unlink()
+                    
+                    results.append({
+                        'file': f"{pdf_file.name} (página {page_num})",
+                        'success': success,
+                        'output_dir': str(pdf_output_dir)
+                    })
+                    if success:
+                        successful += 1
+                    else:
+                        failed += 1
+                
+            except Exception as e:
+                print(f"  ERRO ao processar PDF: {e}")
+                results.append({
+                    'file': pdf_file.name,
+                    'success': False,
+                    'output_dir': 'N/A'
+                })
+                failed += 1
+            print()
 
-    print(f"Sucesso: {successful} | Falhas: {failed}")
+    print(f"\n{'='*60}")
+    print(f"RESUMO: Sucesso: {successful} | Falhas: {failed}")
+    print(f"{'='*60}")
+    
+    # Generate master table combining all results
+    if successful > 0:
+        print(f"\n{'='*60}")
+        print("Gerando tabela mestre com todos os resultados...")
+        try:
+            from create_master_table import create_master_table
+            master_file = create_master_table(str(output_path))
+            if master_file:
+                print(f"✅ Tabela mestre criada: {master_file}")
+            else:
+                print("⚠️  Nenhum resultado válido encontrado para tabela mestre")
+        except Exception as e:
+            print(f"❌ Erro ao criar tabela mestre: {e}")
+        print(f"{'='*60}")
 
     summary_file = output_path / "summary.txt"
     with open(summary_file, 'w', encoding='utf-8') as f:
         f.write(f"RESUMO DO PROCESSAMENTO EM LOTE\n{'='*60}\n")
-        f.write(f"Total: {len(image_files)} | Sucesso: {successful} | Falhas: {failed}\n\n")
+        f.write(f"Total de arquivos: {total_files}\n")
+        f.write(f"  Imagens: {len(image_files)}\n")
+        f.write(f"  PDFs: {len(pdf_files)}\n")
+        f.write(f"Sucesso: {successful} | Falhas: {failed}\n\n")
         for result in results:
             status = "✓ SUCESSO" if result['success'] else "✗ FALHA"
             f.write(f"{status}: {result['file']}\n  Saída: {result['output_dir']}\n\n")
