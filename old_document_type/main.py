@@ -33,6 +33,9 @@ Examples:
   
   # Provide QR data directly (for testing)
   python main.py --qr-data "1;2;3.Student1;Student2;Student3"
+  
+  # Run the FULL pipeline on a folder
+  python main.py --full examples/
         """
     )
     
@@ -63,6 +66,13 @@ Examples:
     )
     
     parser.add_argument(
+        '--full',
+        type=str,
+        metavar='FOLDER',
+        help='Run the full pipeline (OCR, consolidate, update cloud) on the given folder'
+    )
+    
+    parser.add_argument(
         '--output',
         type=str,
         help='Path to output CSV file for single image (overrides default in script)'
@@ -77,7 +87,7 @@ Examples:
     parser.add_argument(
         '--debug',
         action='store_true',
-        help='Enable debug image generation (profiling version only)'
+        help='Enable debug image generation'
     )
     
     parser.add_argument(
@@ -89,33 +99,53 @@ Examples:
     args = parser.parse_args()
     
     # Validate arguments
-    if args.batch and args.image:
-        print("Error: Cannot specify both --batch and --image", file=sys.stderr)
+    if sum(1 for x in [args.batch, args.image, args.full] if x) > 1:
+        print("Error: Cannot specify more than one of --batch, --image, or --full", file=sys.stderr)
         sys.exit(1)
     
     # Import the appropriate version
     if args.profile:
         print("Running profiling version with performance metrics...")
+        # pyrefly: ignore [missing-import]
         import extrair_table_profiling as extractor
-        
         if args.debug:
-            extractor.ENABLE_DEBUG_IMAGES = True
             extractor.PROFILE_DETAILED = True
     else:
         print("Running QR-based version...")
         import extrair_table_qr as extractor
+        
+    if args.debug:
+        extractor.ENABLE_DEBUG_IMAGES = True
     
     # Run batch or single processing
     try:
-        if args.batch:
+        if args.batch or args.full:
             # Batch processing mode
-            batch_folder = Path(args.batch)
+            batch_folder = Path(args.batch if args.batch else args.full)
             if not batch_folder.exists():
-                print(f"Error: Batch folder not found: {batch_folder}", file=sys.stderr)
+                print(f"Error: Folder not found: {batch_folder}", file=sys.stderr)
                 sys.exit(1)
             
             output_dir = args.output_dir or "resultados/batch"
             extractor.process_batch(str(batch_folder), output_dir)
+            
+            if args.full:
+                print("\n" + "=" * 60)
+                print("🔄 RUNNING FULL PIPELINE")
+                print("=" * 60)
+                
+                # 1. Create master table
+                from create_master_table import create_master_table
+                master_csv = create_master_table(output_dir)
+                
+                if master_csv:
+                    # 2. Update cloud statistics
+                    from update_cloud_statistics import run_update
+                    MATRIX_CSV = 'matriz_assuntos_subatributos_populated.csv'
+                    CREDENTIALS = 'credenciais.json'
+                    SHEET_ID = '1v21Q3TKPkJuf08HvwpMmZ6IYwa6Wsht2S4OvlKmenfc'
+                    
+                    run_update(master_csv, MATRIX_CSV, CREDENTIALS, SHEET_ID)
             
         else:
             # Single image/PDF processing mode
@@ -142,7 +172,9 @@ Examples:
                     # Save the selected page as temporary image
                     temp_image_path = Path(extractor.DEBUG_DIR) / f"pdf_page_{page_num}.png"
                     temp_image_path.parent.mkdir(parents=True, exist_ok=True)
+                    # pyrefly: ignore [missing-import]
                     import cv2
+
                     cv2.imwrite(str(temp_image_path), images[page_num - 1])
                     
                     print(f"  Processing page {page_num} of {len(images)}")

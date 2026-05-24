@@ -105,6 +105,15 @@ poetry run python main.py --profile --batch examples/
 poetry run python main.py --batch examples/ --output-dir resultados/my_batch/
 ```
 
+#### Full Pipeline Execution (End-to-End)
+
+You can run the entire pipeline—from image OCR extraction to Google Sheets upload—with a single command. This will process all images, create a master table, and upload aggregated statistics.
+
+```bash
+# Run the full pipeline
+poetry run python main.py --full examples/
+```
+
 **Batch Output Structure:**
 ```
 resultados/batch/
@@ -149,13 +158,17 @@ OCR_Project/
 ├── main.py                      # CLI entry point
 ├── extrair_table_fixed.py       # Standard extraction pipeline
 ├── extrair_table_profiling.py   # Profiling version with performance metrics
+├── extrair_table_qr.py          # Extraction utilizing QR metadata
+├── create_master_table.py       # Consolidates batch results into a master table
+├── update_cloud_statistics.py   # Aggregates master table stats and uploads to Google Sheets
+├── google_sheets_utils.py       # Cell coordinate mapping for Google Sheets integration
 ├── pyproject.toml               # Poetry dependencies
 ├── requirements.txt             # Pip dependencies
 ├── examples/                    # Sample answer sheet images
 │   └── image.png
 ├── resultados/                  # Output CSV files
 ├── debug/                       # Debug images (grid detection, OCR, etc.)
-├── archive/                     # Archived/unused code
+├── archive/                     # Archived code (e.g., teste.py, populate_matrix.py, etc.)
 └── AGENTS.md                    # Development guidelines for AI agents
 ```
 

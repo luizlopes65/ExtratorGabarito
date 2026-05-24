@@ -40,6 +40,9 @@ The extraction pipeline follows this flow:
 6. For each answer cell, detect the selected bubble using density and intensity heuristics.
 7. Build `pandas.DataFrame` outputs for answers, confidence scores, and fill densities.
 8. Save CSV outputs and intermediate debug images.
+9. Combine individual CSV results into a single `master_table.csv`
+10. Aggregate `master_table.csv` against the configured mathematical subjects matrix.
+11. Perform a single batch API call to Google Sheets to write the statistics.
 
 ## Recent Improvements (2026-04)
 
@@ -61,9 +64,12 @@ These changes ensure correct extraction for answer sheets with formats like:
 ## Important Files
 
 ### Core Scripts
-- `main.py`: CLI entry point with argument parsing for running either version
-- `extrair_table_fixed.py`: Standard OCR/OMR pipeline with debug artifact generation
-- `extrair_table_profiling.py`: Profiling version with parallel OCR and performance metrics
+- `main.py`: CLI entry point with argument parsing for running either version, including the full end-to-end pipeline.
+- `extrair_table_fixed.py` / `extrair_table_qr.py`: Standard OCR/OMR pipelines with debug artifact generation.
+- `extrair_table_profiling.py`: Profiling version with parallel OCR and performance metrics.
+- `create_master_table.py`: Generates a consolidated output of all batch results.
+- `update_cloud_statistics.py`: Processes the master table to upload mathematical matrix statistics to Google Sheets.
+- `google_sheets_utils.py`: Contains configuration parameters and helper logic for interacting with Google Sheets (coordinate calculation, merge resolution).
 
 ### Configuration & Dependencies
 - `pyproject.toml`: Python version and Poetry dependencies (authoritative)
@@ -108,17 +114,17 @@ The scripts expect Tesseract at `/opt/homebrew/bin/tesseract`. Update `TESSERACT
 
 ### Running the extractor
 
-**Recommended: Use main.py CLI**
+# Recommended: Use main.py CLI
 
 ```bash
-# Standard version
+# Standard version on a single image
 poetry run python main.py
 
 # Profiling version
 poetry run python main.py --profile
 
-# Custom image
-poetry run python main.py --image examples/my_sheet.png
+# Run full extraction, consolidation, and cloud sync pipeline
+poetry run python main.py --full examples/
 ```
 
 **Direct script execution**
@@ -207,7 +213,7 @@ There is no automated test suite configured at this time.
 
 - No automated tests yet
 - Configuration is script-level constants (no config file)
-- No batch processing support (processes one image at a time)
+- Google Sheets connectivity relies heavily on `credenciais.json` and strict sheet ID parameters.
 - Template-based extraction code is archived but not integrated with main pipeline
 
 ### Future Improvements

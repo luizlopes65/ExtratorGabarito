@@ -1,8 +1,10 @@
-import gspread
-import time
+"""
+Utility functions for interacting with Google Sheets, resolving merges,
+and translating subject/attribute matrices to cell coordinates.
+"""
 
 # ==============================================================================
-# 1. MAPEAMENTO (sem alterações)
+# MAPEAMENTO
 # ==============================================================================
 
 MAPA_LINHAS = {
@@ -55,7 +57,7 @@ MAPA_COLUNAS_INFERIOR = {
 }
 
 # ==============================================================================
-# 2. NOVO: RESOLVER ÂNCORA DE CÉLULA MESCLADA
+# RESOLVER ÂNCORA DE CÉLULA MESCLADA
 # ==============================================================================
 
 def col_letra_para_indice(letra: str) -> int:
@@ -110,13 +112,13 @@ def resolver_ancora(aba, coordenada: str) -> str:
             ancora_linha = sr + 1  # volta para base-1
             ancora = f"{ancora_col}{ancora_linha}"
             if ancora != coordenada:
-                print(f"  ⚠ '{coordenada}' é célula mesclada. Usando âncora: '{ancora}'")
+                pass # Pode-se adicionar log se necessário
             return ancora
 
     return coordenada  # não mesclada, usa como está
 
 # ==============================================================================
-# 3. RESOLUÇÃO DE COORDENADAS (sem alterações)
+# RESOLUÇÃO DE COORDENADAS
 # ==============================================================================
 
 def obter_coordenada(atributo: str, subatributo: str) -> str:
@@ -138,55 +140,3 @@ def obter_coordenada(atributo: str, subatributo: str) -> str:
 
     coluna = mapa_colunas[sub_norm]
     return f"{coluna}{linha}"
-
-# ==============================================================================
-# 4. ATUALIZAÇÃO COM RESOLUÇÃO AUTOMÁTICA DE ÂNCORA
-# ==============================================================================
-
-def atualizar_e_verificar(aba, atributo: str, subatributo: str, novo_valor: int):
-    try:
-        coordenada = obter_coordenada(atributo, subatributo)
-        
-        # NOVO: resolve a âncora antes de escrever
-        coordenada = resolver_ancora(aba, coordenada)
-
-        aba.update_acell(coordenada, novo_valor)
-        print(f"-> Escrito em {coordenada} ({atributo} -> {subatributo})")
-
-        time.sleep(1)
-
-        valor_na_nuvem = aba.acell(coordenada).value
-
-        if str(valor_na_nuvem) == str(novo_valor):
-            print(f"✅ CONFIRMADO: {coordenada} = {valor_na_nuvem}\n")
-        else:
-            print(f"⚠️  Google retornou '{valor_na_nuvem}' para {coordenada}.\n")
-
-    except Exception as e:
-        print(f"❌ Erro: {e}\n")
-
-# ==============================================================================
-# EXECUÇÃO
-# ==============================================================================
-
-def atualizar_matriz_matematica():
-    nome_ficheiro_json = 'credenciais.json'
-    ID_DA_FOLHA = '1v21Q3TKPkJuf08HvwpMmZ6IYwa6Wsht2S4OvlKmenfc'
-
-    try:
-        config_autenticacao = gspread.service_account(filename=nome_ficheiro_json)
-        folha_calculo = config_autenticacao.open_by_key(ID_DA_FOLHA)
-        aba = folha_calculo.get_worksheet(2)
-
-        print("Conectado. Iniciando testes:\n")
-
-        atualizar_e_verificar(aba, "Compor e decompor números", "Significado primário", 1)
-        atualizar_e_verificar(aba, "Fração", "Reta Numérica", 5)
-
-    except gspread.exceptions.APIError as erro:
-        print(f"Erro na API do Google: {erro}")
-    except FileNotFoundError:
-        print(f"Erro: Ficheiro '{nome_ficheiro_json}' não encontrado.")
-
-if __name__ == '__main__':
-    atualizar_matriz_matematica()

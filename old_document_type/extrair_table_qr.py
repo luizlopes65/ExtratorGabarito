@@ -1,12 +1,16 @@
+# pyrefly: ignore [missing-import]
 import cv2
+# pyrefly: ignore [missing-import]
 import numpy as np
 import pandas as pd
+# pyrefly: ignore [missing-import]
 import pytesseract
 import re
 import shutil
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+# pyrefly: ignore [missing-import]
 from pyzbar import pyzbar
 import json
 
@@ -17,6 +21,8 @@ import json
 IMAGE_PATH = "examples/page_002.png"
 OUTPUT_CSV = "resultados/resultado_gabarito_qr.csv"
 DEBUG_DIR = "debug/debug_gabarito_qr"
+ENABLE_DEBUG_IMAGES = False
+
 
 TESSERACT_CMD = r"/opt/homebrew/bin/tesseract"
 
@@ -76,16 +82,21 @@ class CellResult:
 if TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-Path(DEBUG_DIR).mkdir(exist_ok=True)
+# Path(DEBUG_DIR).mkdir(exist_ok=True)  # Now handled inside save_debug
 
 # ============================================================
 # UTILITÁRIOS GERAIS
 # ============================================================
 
 def save_debug(name: str, img: np.ndarray):
+    if not ENABLE_DEBUG_IMAGES:
+        return
+    Path(DEBUG_DIR).mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(Path(DEBUG_DIR) / name), img)
 
 def clear_debug_dir(debug_dir: str):
+    if not ENABLE_DEBUG_IMAGES:
+        return
     debug_path = Path(debug_dir)
     if debug_path.exists():
         shutil.rmtree(debug_path)
