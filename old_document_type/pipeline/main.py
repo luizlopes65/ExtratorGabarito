@@ -1,7 +1,10 @@
 import sys
 import argparse
 from pathlib import Path
-from pdf_utils import is_pdf_file, pdf_to_images
+# pyrefly: ignore [missing-import]
+from helpers.pdf_utils import is_pdf_file, pdf_to_images
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main():
@@ -103,16 +106,17 @@ Examples:
         print("Error: Cannot specify more than one of --batch, --image, or --full", file=sys.stderr)
         sys.exit(1)
     
-    # Import the appropriate version
+    # Always import the QR-based version
+    # pyrefly: ignore [missing-import]
+    from helpers import extrair_table_qr as extractor
+    
     if args.profile:
         print("Running profiling version with performance metrics...")
         # pyrefly: ignore [missing-import]
-        import extrair_table_profiling as extractor
-        if args.debug:
-            extractor.PROFILE_DETAILED = True
+        from helpers.profiler import TimeProfiler
+        TimeProfiler.enable()
     else:
         print("Running QR-based version...")
-        import extrair_table_qr as extractor
         
     if args.debug:
         extractor.ENABLE_DEBUG_IMAGES = True
@@ -135,14 +139,16 @@ Examples:
                 print("=" * 60)
                 
                 # 1. Create master table
-                from create_master_table import create_master_table
+                # pyrefly: ignore [missing-import]
+                from helpers.create_master_table import create_master_table
                 master_csv = create_master_table(output_dir)
                 
                 if master_csv:
                     # 2. Update cloud statistics
-                    from update_cloud_statistics import run_update
-                    MATRIX_CSV = 'matriz_assuntos_subatributos_populated.csv'
-                    CREDENTIALS = 'credenciais.json'
+                    # pyrefly: ignore [missing-import]
+                    from helpers.update_cloud_statistics import run_update
+                    MATRIX_CSV = str(PROJECT_ROOT / 'matriz_assuntos_subatributos_populated.csv')
+                    CREDENTIALS = str(PROJECT_ROOT / 'credenciais.json')
                     SHEET_ID = '1v21Q3TKPkJuf08HvwpMmZ6IYwa6Wsht2S4OvlKmenfc'
                     
                     run_update(master_csv, MATRIX_CSV, CREDENTIALS, SHEET_ID)
@@ -191,14 +197,9 @@ Examples:
             if args.output:
                 extractor.OUTPUT_CSV = args.output
             
-            # Set QR data if provided (only for QR version)
-            if args.qr_data and not args.profile:
-                extractor.QR_DATA = args.qr_data
-                print(f"Using provided QR data: {args.qr_data[:50]}...")
-            
             # Call main with qr_data parameter for QR version
-            if not args.profile and hasattr(extractor, 'QR_DATA'):
-                extractor.main(qr_data=extractor.QR_DATA)
+            if args.qr_data:
+                extractor.main(qr_data=args.qr_data)
             else:
                 extractor.main()
             
@@ -207,6 +208,11 @@ Examples:
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        if args.profile:
+            # pyrefly: ignore [missing-import]
+            from helpers.profiler import TimeProfiler
+            TimeProfiler.print_report()
 
 
 if __name__ == "__main__":

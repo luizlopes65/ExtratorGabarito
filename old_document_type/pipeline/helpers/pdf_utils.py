@@ -6,13 +6,17 @@ This module provides utilities to convert PDF files to images for processing.
 Each page of the PDF is converted to a separate image.
 """
 
+# pyrefly: ignore [missing-import]
 import numpy as np
+# pyrefly: ignore [missing-import]
 import cv2
 from pathlib import Path
 from typing import List, Optional
+from .profiler import profile_time
 
-
+@profile_time("pdf_to_images")
 def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
+    # pyrefly: ignore [missing-import]
     from pdf2image import convert_from_path
 
     
@@ -108,6 +112,7 @@ def get_pdf_page_count(pdf_path: str) -> int:
         Number of pages in the PDF
     """
     try:
+        # pyrefly: ignore [missing-import]
         from pdf2image import pdfinfo_from_path
         info = pdfinfo_from_path(pdf_path)
         return info.get("Pages", 0)

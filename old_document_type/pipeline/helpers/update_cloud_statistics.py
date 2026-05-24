@@ -10,6 +10,7 @@ Scoring: B=0, 1=0, 2 or 3=+1
 
 import pandas as pd
 import csv
+# pyrefly: ignore [missing-import]
 import gspread
 import time
 from pathlib import Path
@@ -17,7 +18,8 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 
 # Import functions from google_sheets_utils.py
-from google_sheets_utils import (
+# pyrefly: ignore [missing-import]
+from helpers.google_sheets_utils import (
     obter_coordenada,
     resolver_ancora,
     col_letra_para_indice,

@@ -13,14 +13,18 @@ from typing import List, Tuple, Optional
 # pyrefly: ignore [missing-import]
 from pyzbar import pyzbar
 import json
+from pathlib import Path
+from .profiler import profile_time
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ============================================================
 # CONFIGURAÇÕES
 # ============================================================
 
-IMAGE_PATH = "examples/page_002.png"
-OUTPUT_CSV = "resultados/resultado_gabarito_qr.csv"
-DEBUG_DIR = "debug/debug_gabarito_qr"
+IMAGE_PATH = str(PROJECT_ROOT / "examples/page_002.png")
+OUTPUT_CSV = str(PROJECT_ROOT / "resultados/resultado_gabarito_qr.csv")
+DEBUG_DIR = str(PROJECT_ROOT / "debug/debug_gabarito_qr")
 ENABLE_DEBUG_IMAGES = False
 
 
@@ -186,6 +190,7 @@ def find_document_contour(gray: np.ndarray) -> Optional[np.ndarray]:
             return approx.reshape(4, 2)
     return None
 
+@profile_time("preprocess_document")
 def preprocess_document(img: np.ndarray) -> np.ndarray:
     gray = to_gray(img)
     doc = find_document_contour(gray)
@@ -286,6 +291,7 @@ def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int, 
 # FIX 2: Robust header-row identification
 # ============================================================
 
+@profile_time("identify_header_and_student_rows")
 def identify_header_and_student_rows(img, row_intervals):
     """
     Identify the header row (question numbers) and student rows.
@@ -358,6 +364,7 @@ def identify_header_and_student_rows(img, row_intervals):
 # Main grid structure (uses both fixes)
 # ============================================================
 
+@profile_time("get_table_structure")
 def get_table_structure(img: np.ndarray, expected_question_count: int = 0):
     """
     Extract table structure from image.
@@ -600,6 +607,7 @@ def reconcile_question_headers(question_headers: List[str],
 # QR CODE DETECTION AND PARSING
 # ============================================================
 
+@profile_time("detect_qr_code")
 def detect_qr_code(img: np.ndarray) -> Optional[str]:
     """
     Detect and decode QR code from the top-left corner of the image.
@@ -995,6 +1003,7 @@ def fallback_circle_in_band(gray, y1, y2, x_center):
             candidates.append((cx, cy, r))
     return candidates
 
+@profile_time("detect_filled_option_v4")
 def detect_filled_option_v4(cell: np.ndarray, debug_name: Optional[str] = None) -> CellResult:
     if cell is None or cell.size == 0:
         if debug_name:
@@ -1170,6 +1179,7 @@ def choose_question_columns(headers, col_intervals):
         question_cols = [i for i in range(len(col_intervals)) if i != name_col_idx]
     return name_col_idx, question_cols
 
+@profile_time("build_final_table")
 def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
     """
     Build the final extraction table.
@@ -1449,6 +1459,7 @@ def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
 # BATCH / SINGLE PROCESSING (unchanged)
 # ============================================================
 
+@profile_time("process_single_image")
 def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bool:
     try:
         img = cv2.imread(image_path)
@@ -1492,6 +1503,36 @@ def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bo
         return False
 
 
+def _worker_process_single(task_info):
+    import cv2
+    from pathlib import Path
+    import traceback
+    
+    # Avoid OpenCV thread oversubscription in multiprocessing
+    cv2.setNumThreads(1)
+    
+    try:
+        success = process_single_image(task_info['image_path'], task_info['output_csv'], task_info['debug_dir'])
+        if task_info.get('is_temp'):
+            try:
+                Path(task_info['image_path']).unlink()
+            except Exception:
+                pass
+        return {
+            'file': task_info['file_name'],
+            'success': success,
+            'output_dir': str(Path(task_info['output_csv']).parent)
+        }
+    except Exception as e:
+        print(f"Erro no worker ao processar {task_info['file_name']}: {e}")
+        traceback.print_exc()
+        return {
+            'file': task_info['file_name'],
+            'success': False,
+            'output_dir': 'N/A'
+        }
+
+@profile_time("process_batch")
 def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     input_path = Path(input_folder)
     output_path = Path(output_dir)
@@ -1526,79 +1567,83 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     failed = 0
     file_counter = 0
 
-    # Process image files
+    tasks = []
+
+    # Prepare image tasks
     for image_file in image_files:
-        file_counter += 1
-        print(f"[{file_counter}/{total_files}] Processando imagem: {image_file.name}")
         image_stem = image_file.stem
         image_output_dir = output_path / image_stem
         image_output_dir.mkdir(exist_ok=True)
         output_csv = str(image_output_dir / "resultado.csv")
         debug_dir = str(image_output_dir / "debug")
-        success = process_single_image(str(image_file), output_csv, debug_dir)
-        results.append({'file': image_file.name, 'success': success, 'output_dir': str(image_output_dir)})
-        if success:
-            successful += 1
-        else:
-            failed += 1
-        print()
+        tasks.append({
+            'image_path': str(image_file),
+            'output_csv': output_csv,
+            'debug_dir': debug_dir,
+            'file_name': image_file.name,
+            'is_temp': False
+        })
     
-    # Process PDF files
+    # Prepare PDF tasks
     try:
-        from pdf_utils import pdf_to_images
+        # pyrefly: ignore [missing-import]
+        from helpers.pdf_utils import pdf_to_images
         pdf_support = True
     except ImportError:
         pdf_support = False
         if pdf_files:
             print("AVISO: pdf2image não disponível. PDFs serão ignorados.")
-    
+            
     if pdf_support:
         for pdf_file in pdf_files:
-            file_counter += 1
-            print(f"[{file_counter}/{total_files}] Processando PDF: {pdf_file.name}")
+            print(f"Extraindo páginas do PDF: {pdf_file.name}")
             try:
-                # Convert PDF to images
                 images = pdf_to_images(str(pdf_file))
                 print(f"  PDF contém {len(images)} página(s)")
-                
-                # Process each page
                 for page_num, img in enumerate(images, 1):
                     pdf_stem = f"{pdf_file.stem}_page{page_num}"
                     pdf_output_dir = output_path / pdf_stem
                     pdf_output_dir.mkdir(exist_ok=True)
                     
-                    # Save temporary image
                     temp_img_path = pdf_output_dir / "temp_page.png"
                     cv2.imwrite(str(temp_img_path), img)
                     
                     output_csv = str(pdf_output_dir / "resultado.csv")
                     debug_dir = str(pdf_output_dir / "debug")
                     
-                    print(f"    Processando página {page_num}/{len(images)}...")
-                    success = process_single_image(str(temp_img_path), output_csv, debug_dir)
-                    
-                    # Clean up temp image
-                    temp_img_path.unlink()
-                    
-                    results.append({
-                        'file': f"{pdf_file.name} (página {page_num})",
-                        'success': success,
-                        'output_dir': str(pdf_output_dir)
+                    tasks.append({
+                        'image_path': str(temp_img_path),
+                        'output_csv': output_csv,
+                        'debug_dir': debug_dir,
+                        'file_name': f"{pdf_file.name} (página {page_num})",
+                        'is_temp': True
                     })
-                    if success:
-                        successful += 1
-                    else:
-                        failed += 1
-                
             except Exception as e:
-                print(f"  ERRO ao processar PDF: {e}")
+                print(f"  ERRO ao extrair PDF {pdf_file.name}: {e}")
                 results.append({
                     'file': pdf_file.name,
                     'success': False,
                     'output_dir': 'N/A'
                 })
                 failed += 1
-            print()
+
+    print(f"\nIniciando processamento paralelo de {len(tasks)} tarefas...")
+    
+    import concurrent.futures
+    import multiprocessing
+    # Reserve 1 core to not freeze the machine completely, or use all if small
+    max_workers = max(1, multiprocessing.cpu_count() - 1)
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {executor.submit(_worker_process_single, t): t for t in tasks}
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_task), 1):
+            res = future.result()
+            print(f"[{i}/{len(tasks)}] Concluído: {res['file']} -> {'SUCESSO' if res['success'] else 'FALHA'}")
+            results.append(res)
+            if res['success']:
+                successful += 1
+            else:
+                failed += 1
 
     print(f"\n{'='*60}")
     print(f"RESUMO: Sucesso: {successful} | Falhas: {failed}")
@@ -1609,7 +1654,8 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
         print(f"\n{'='*60}")
         print("Gerando tabela mestre com todos os resultados...")
         try:
-            from create_master_table import create_master_table
+            # pyrefly: ignore [missing-import]
+            from helpers.create_master_table import create_master_table
             master_file = create_master_table(str(output_path))
             if master_file:
                 print(f"✅ Tabela mestre criada: {master_file}")
@@ -1632,6 +1678,7 @@ def process_batch(input_folder: str, output_dir: str = "resultados/batch"):
     print(f"Resumo salvo em: {summary_file}")
 
 
+@profile_time("main")
 def main(qr_data: Optional[str] = None):
     """
     Main extraction function.
