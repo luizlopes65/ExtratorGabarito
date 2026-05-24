@@ -292,7 +292,7 @@ def filter_margin_columns(col_intervals: List[Tuple[int, int]], img_width: int, 
 # ============================================================
 
 @profile_time("identify_header_and_student_rows")
-def identify_header_and_student_rows(img, row_intervals):
+def identify_header_and_student_rows(img, row_intervals, use_qr_mode=False):
     """
     Identify the header row (question numbers) and student rows.
 
@@ -315,29 +315,33 @@ def identify_header_and_student_rows(img, row_intervals):
     heights = [y2 - y1 for y1, y2 in row_intervals]
     median_h = float(np.median(heights))
 
-    # ---------- try OCR-based detection first ----------
-    # Quick OCR of first column of each candidate row to find "Nome do Aluno"
-    gray = to_gray(img)
-    img_w = img.shape[1]
-    # Use roughly the left 30% of the image as the name-column region for scanning
-    scan_x2 = int(img_w * 0.30)
-
+    # ---------- try OCR-based detection first (if not using QR mode) ----------
     header_row_idx = None
-    for i, (y1, y2) in enumerate(row_intervals[:6]):
-        cell = crop(gray, 0, y1, scan_x2, y2, pad=2)
-        if cell is None:
-            continue
-        try:
-            txt = pytesseract.image_to_string(
-                cell, lang=OCR_LANG,
-                config="--oem 3 --psm 6"
-            ).upper()
-        except Exception:
-            txt = ""
-        if re.search(r"NOME", txt):
-            header_row_idx = i
-            print(f"  [header] Found 'Nome' in row {i} via OCR → header_row_idx={i}")
-            break
+    
+    if not use_qr_mode:
+        # Quick OCR of first column of each candidate row to find "Nome do Aluno"
+        gray = to_gray(img)
+        img_w = img.shape[1]
+        # Use roughly the left 30% of the image as the name-column region for scanning
+        scan_x2 = int(img_w * 0.30)
+    
+        for i, (y1, y2) in enumerate(row_intervals[:6]):
+            cell = crop(gray, 0, y1, scan_x2, y2, pad=2)
+            if cell is None:
+                continue
+            try:
+                txt = pytesseract.image_to_string(
+                    cell, lang=OCR_LANG,
+                    config="--oem 3 --psm 6"
+                ).upper()
+            except Exception:
+                txt = ""
+            if re.search(r"NOME", txt):
+                header_row_idx = i
+                print(f"  [header] Found 'Nome' in row {i} via OCR → header_row_idx={i}")
+                break
+    else:
+        print("  [header] Skipping OCR header detection (QR mode active)")
 
     # ---------- fallback: shortest row among first N candidates ----------
     if header_row_idx is None:
@@ -1232,7 +1236,7 @@ def build_final_table(img: np.ndarray, qr_data: Optional[str] = None):
         raise RuntimeError("Não foi possível detectar linhas suficientes.")
 
     # ── FIX 2: robust header detection ──
-    header_row, candidate_student_rows = identify_header_and_student_rows(img, row_intervals)
+    header_row, candidate_student_rows = identify_header_and_student_rows(img, row_intervals, use_qr_mode)
     if header_row is None:
         raise RuntimeError("Não foi possível identificar a linha de cabeçalho.")
     
