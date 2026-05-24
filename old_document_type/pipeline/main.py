@@ -9,114 +9,129 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract answers from scanned multiple-choice answer sheets",
+        description="Extrair respostas de gabaritos de múltipla escolha digitalizados",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Run QR-based version on single image (default)
-  python main.py
+Exemplos:
+  # Rodar a versão baseada em QR code em uma única imagem (padrão)
+  poetry run python pipeline/main.py
   
-  # Process a PDF file (first page)
-  python main.py --image exam.pdf
+  # Processar um arquivo PDF (primeira página)
+  poetry run python pipeline/main.py --image prova.pdf
   
-  # Process specific page from PDF
-  python main.py --image exam.pdf --pdf-page 2
+  # Processar uma página específica do PDF
+  poetry run python pipeline/main.py --image prova.pdf --pdf-page 2
   
-  # Process all images in a folder
-  python main.py --batch examples/
+  # Processar todas as imagens em uma pasta
+  poetry run python pipeline/main.py --batch exemplos/
   
-  # Run with profiling enabled
-  python main.py --profile --image examples/my_sheet.png
+  # Rodar com o modo de profiling (métricas) habilitado
+  poetry run python pipeline/main.py --profile --image exemplos/meu_gabarito.png
   
-  # Batch process with profiling
-  python main.py --profile --batch examples/
+  # Processar em lote (batch) com profiling
+  poetry run python pipeline/main.py --profile --batch exemplos/
   
-  # Specify custom output directory for batch
-  python main.py --batch examples/ --output-dir resultados/batch_run/
+  # Especificar diretório de saída customizado para o lote
+  poetry run python pipeline/main.py --batch exemplos/ --output-dir resultados/meu_lote/
   
-  # Provide QR data directly (for testing)
-  python main.py --qr-data "1;2;3.Student1;Student2;Student3"
-  
-  # Run the FULL pipeline on a folder
-  python main.py --full examples/
+  # Rodar o pipeline COMPLETO em uma pasta (Gera CSV Master e sobe pra nuvem)
+  poetry run python pipeline/main.py --full exemplos/
         """
     )
     
     parser.add_argument(
         '--profile',
         action='store_true',
-        help='Run profiling version with performance metrics'
+        help='Rodar a versão de profiling com métricas de performance'
     )
     
     parser.add_argument(
         '--image',
         type=str,
-        help='Path to input image or PDF file (overrides default in script)'
+        help='Caminho para a imagem de entrada ou arquivo PDF (sobrescreve o padrão no script)'
     )
     
     parser.add_argument(
         '--pdf-page',
         type=int,
         default=1,
-        help='Page number to extract from PDF (default: 1, first page)'
+        help='Número da página para extrair do PDF (padrão: 1, primeira página)'
     )
     
     parser.add_argument(
         '--batch',
         type=str,
-        metavar='FOLDER',
-        help='Process all images in the specified folder'
+        metavar='PASTA',
+        help='Processar todas as imagens na pasta especificada'
     )
     
     parser.add_argument(
         '--full',
         type=str,
-        metavar='FOLDER',
-        help='Run the full pipeline (OCR, consolidate, update cloud) on the given folder'
+        metavar='PASTA',
+        help='Rodar o pipeline completo (OCR, consolidar tabela master, atualizar nuvem) na pasta especificada'
     )
     
     parser.add_argument(
         '--output',
         type=str,
-        help='Path to output CSV file for single image (overrides default in script)'
+        help='Caminho para o arquivo CSV de saída para imagem única (sobrescreve o padrão no script)'
     )
     
     parser.add_argument(
         '--output-dir',
         type=str,
-        help='Output directory for batch processing results (default: resultados/batch/)'
+        help='Diretório de saída para os resultados do processamento em lote (padrão: resultados/batch/)'
     )
     
     parser.add_argument(
         '--debug',
         action='store_true',
-        help='Enable debug image generation'
+        help='Habilitar geração de imagens de debug'
+    )
+    
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Mostrar logs detalhados de execução no terminal'
     )
     
     parser.add_argument(
         '--qr-data',
         type=str,
-        help='QR code data string (format: "q1;q2;q3.student1;student2;student3")'
+        help='String de dados do QR code (formato: "q1;q2;q3.aluno1;aluno2")'
     )
     
     args = parser.parse_args()
     
     # Validate arguments
     if sum(1 for x in [args.batch, args.image, args.full] if x) > 1:
-        print("Error: Cannot specify more than one of --batch, --image, or --full", file=sys.stderr)
+        print("Erro: Não é possível especificar mais de um parâmetro principal simultaneamente (--batch, --image ou --full).", file=sys.stderr)
         sys.exit(1)
+        
+    if args.image:
+        image_path = Path(args.image)
+        if image_path.is_dir():
+            print(f"Erro: O caminho passado para --image ({args.image}) é um diretório.", file=sys.stderr)
+            print("Para processar diretórios, utilize o argumento --batch. Exemplo: poetry run python pipeline/main.py --batch", args.image, file=sys.stderr)
+            sys.exit(1)
+            
+    # Configurar o logger
+    # pyrefly: ignore [missing-import]
+    from helpers.logger import setup_logger
+    logger = setup_logger(args.verbose)
     
     # Always import the QR-based version
     # pyrefly: ignore [missing-import]
     from helpers import extrair_table_qr as extractor
     
     if args.profile:
-        print("Running profiling version with performance metrics...")
+        logger.info("Running profiling version with performance metrics...")
         # pyrefly: ignore [missing-import]
         from helpers.profiler import TimeProfiler
         TimeProfiler.enable()
     else:
-        print("Running QR-based version...")
+        logger.info("Running QR-based version...")
         
     if args.debug:
         extractor.ENABLE_DEBUG_IMAGES = True
@@ -127,16 +142,16 @@ Examples:
             # Batch processing mode
             batch_folder = Path(args.batch if args.batch else args.full)
             if not batch_folder.exists():
-                print(f"Error: Folder not found: {batch_folder}", file=sys.stderr)
+                print(f"Erro: Pasta não encontrada: {batch_folder}", file=sys.stderr)
                 sys.exit(1)
             
             output_dir = args.output_dir or "resultados/batch"
             extractor.process_batch(str(batch_folder), output_dir)
             
             if args.full:
-                print("\n" + "=" * 60)
-                print("🔄 RUNNING FULL PIPELINE")
-                print("=" * 60)
+                logger.info("\n" + "=" * 60)
+                logger.info("🔄 RUNNING FULL PIPELINE")
+                logger.info("=" * 60)
                 
                 # 1. Create master table
                 # pyrefly: ignore [missing-import]
@@ -159,15 +174,15 @@ Examples:
             
             # Check if input file exists
             if not Path(input_path).exists():
-                print(f"Error: Input file not found: {input_path}", file=sys.stderr)
+                print(f"Erro: Arquivo de entrada não encontrado: {input_path}", file=sys.stderr)
                 sys.exit(1)
             
             # Handle PDF input
             if is_pdf_file(input_path):
-                print(f"PDF detected: {input_path}")
+                logger.info(f"PDF detected: {input_path}")
                 try:
                     images = pdf_to_images(input_path)
-                    print(f"  Converted {len(images)} page(s) from PDF")
+                    logger.info(f"  Converted {len(images)} page(s) from PDF")
                     
                     # Use specified page or first page
                     page_num = args.pdf_page
@@ -175,15 +190,16 @@ Examples:
                         print(f"Error: Page {page_num} out of range (PDF has {len(images)} pages)", file=sys.stderr)
                         sys.exit(1)
                     
-                    # Save the selected page as temporary image
-                    temp_image_path = Path(extractor.DEBUG_DIR) / f"pdf_page_{page_num}.png"
+                    # Save the selected page as temporary image in a separate cache folder
+                    # so that `clear_debug_dir()` inside `extractor.main()` doesn't delete it
+                    temp_image_path = PROJECT_ROOT / "debug" / "pdf_cache" / f"pdf_page_{page_num}.png"
                     temp_image_path.parent.mkdir(parents=True, exist_ok=True)
                     # pyrefly: ignore [missing-import]
                     import cv2
 
                     cv2.imwrite(str(temp_image_path), images[page_num - 1])
                     
-                    print(f"  Processing page {page_num} of {len(images)}")
+                    logger.info(f"  Processing page {page_num} of {len(images)}")
                     extractor.IMAGE_PATH = str(temp_image_path)
                     
                 except Exception as e:

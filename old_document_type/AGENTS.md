@@ -61,7 +61,17 @@ These changes ensure correct extraction for answer sheets with formats like:
 - `35-A, 35-B, 36-A, 36-B, 37, 38-A, 38-B, 38-C, 39, 40`
 - `1, 2, 3, 47, 5, 64-A, 64-B`
 
-## Important Files
+#### 3. Core Modules
+Avoid looking for logic in monolithic files. The pipeline is split into specialized modules under `pipeline/helpers/`:
+- `pipeline/helpers/extrair_table_qr.py`: Pipeline orchestrator.
+- `pipeline/helpers/qr_parser.py`: QR code reading and data extraction.
+- `pipeline/helpers/grid_detector.py`: OpenCV grid line detection and intersection logic.
+- `pipeline/helpers/bubble_analyzer.py`: Blob detection, marking density threshold checks.
+- `pipeline/helpers/geometry.py`: Perspective warp, cropping.
+- `pipeline/helpers/ocr_utils.py`: Text cleanup and reconciliation.
+- `pipeline/helpers/logger.py`: Logging configuration (used via `--verbose`).
+
+### Important Files
 
 ### Core Scripts
 - `main.py`: CLI entry point with argument parsing for running either version, including the full end-to-end pipeline.

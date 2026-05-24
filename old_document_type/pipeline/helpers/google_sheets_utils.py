@@ -44,16 +44,16 @@ MAPA_COLUNAS_SUPERIOR = {
 
 MAPA_COLUNAS_INFERIOR = {
     "representação visual": "B", "representacao visual": "B",
-    "escrita por extenso": "D",
-    "reta numérica": "F", "reta numerica": "F",
+    "escrita por extenso": "E",
+    "reta numérica": "G", "reta numerica": "G",
     "comparação": "H", "comparacao": "H",
-    "problema com contexto": "J",
-    "frações equivalentes": "L", "fracoes equivalentes": "L",
-    "números mistos": "O", "numeros mistos": "O",
-    "adição/subtração": "Q", "adicao/subtracao": "Q",
-    "multiplicação": "S", "multiplicacao": "S",
-    "divisão": "U", "divisao": "U",
-    "conversão fração <-> decimal": "W", "conversao fraçao <-> decimal": "W"
+    "problema com contexto": "I",
+    "frações equivalentes": "J", "fracoes equivalentes": "J",
+    "números mistos": "K", "numeros mistos": "K",
+    "adição/subtração": "L", "adicao/subtracao": "L",
+    "multiplicação": "M", "multiplicacao": "M",
+    "divisão": "N", "divisao": "N",
+    "conversão fração <-> decimal": "O", "conversao fraçao <-> decimal": "O"
 }
 
 # ==============================================================================

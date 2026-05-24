@@ -75,19 +75,13 @@ The easiest way to run the extractor:
 
 ```bash
 # Run standard version (default)
-poetry run python main.py
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf
 
-# Run with profiling enabled
-poetry run python main.py --profile
+# Para depurar imagens visuais (grade, bolhas, QR) na pasta debug/:
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --debug
 
-# Specify custom image path
-poetry run python main.py --image examples/my_sheet.png
-
-# Run profiling with custom output
-poetry run python main.py --profile --output resultados/custom_output.csv
-
-# Enable debug images (profiling version only)
-poetry run python main.py --profile --debug
+# Para ver o log detalhado no terminal durante a execução:
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --verbose
 ```
 
 #### Batch Processing (Multiple Images)
@@ -155,17 +149,19 @@ poetry run python extrair_table_profiling.py
 
 ```
 OCR_Project/
-├── main.py                      # CLI entry point
-├── extrair_table_fixed.py       # Standard extraction pipeline
-├── extrair_table_profiling.py   # Profiling version with performance metrics
-├── extrair_table_qr.py          # Extraction utilizing QR metadata
-├── create_master_table.py       # Consolidates batch results into a master table
+- `pipeline/main.py`: Ponto de entrada CLI (trata PDFs, argumentos e chamadas em lote).
+- `pipeline/helpers/extrair_table_qr.py`: Orquestrador principal da extração.
+- `pipeline/helpers/qr_parser.py`: Detecção e extração de metadados do QR Code.
+- `pipeline/helpers/grid_detector.py`: Lógica de OpenCV para detecção da grade da tabela.
+- `pipeline/helpers/bubble_analyzer.py`: Identificação de preenchimento das bolhas.
+- `pipeline/helpers/geometry.py`: Processamento geométrico (crop, transformações).
+- `pipeline/helpers/ocr_utils.py`: Funções de limpeza de OCR e texto.
+- `pipeline/helpers/logger.py`: Configuração de logs (`--verbose`).sults into a master table
 ├── update_cloud_statistics.py   # Aggregates master table stats and uploads to Google Sheets
 ├── google_sheets_utils.py       # Cell coordinate mapping for Google Sheets integration
 ├── pyproject.toml               # Poetry dependencies
 ├── requirements.txt             # Pip dependencies
 ├── examples/                    # Sample answer sheet images
-│   └── image.png
 ├── resultados/                  # Output CSV files
 ├── debug/                       # Debug images (grid detection, OCR, etc.)
 ├── archive/                     # Archived code (e.g., teste.py, populate_matrix.py, etc.)
