@@ -184,23 +184,54 @@ Exemplos:
                     images = pdf_to_images(input_path)
                     logger.info(f"  Convertidas {len(images)} página(s) do PDF")
                     
-                    # Usar página especificada ou primeira página
-                    page_num = args.pdf_page
-                    if page_num < 1 or page_num > len(images):
-                        print(f"Erro: Página {page_num} fora do intervalo (PDF tem {len(images)} páginas)", file=sys.stderr)
-                        sys.exit(1)
-                    
-                    # Salvar a página selecionada como imagem temporária em uma pasta de cache separada
-                    # para que `clear_debug_dir()` dentro de `extractor.main()` não a delete
-                    temp_image_path = PROJECT_ROOT / "debug" / "pdf_cache" / f"pdf_page_{page_num}.png"
-                    temp_image_path.parent.mkdir(parents=True, exist_ok=True)
                     # pyrefly: ignore [missing-import]
                     import cv2
-
-                    cv2.imwrite(str(temp_image_path), images[page_num - 1])
                     
-                    logger.info(f"  Processando página {page_num} de {len(images)}")
-                    extractor.IMAGE_PATH = str(temp_image_path)
+                    # Se --pdf-page foi especificado, processar apenas essa página
+                    if args.pdf_page != 1 or len(sys.argv) > 1 and '--pdf-page' in sys.argv:
+                        page_num = args.pdf_page
+                        if page_num < 1 or page_num > len(images):
+                            print(f"Erro: Página {page_num} fora do intervalo (PDF tem {len(images)} páginas)", file=sys.stderr)
+                            sys.exit(1)
+                        
+                        pages_to_process = [page_num]
+                        logger.info(f"  Processando apenas página {page_num}")
+                    else:
+                        # Processar todas as páginas
+                        pages_to_process = range(1, len(images) + 1)
+                        logger.info(f"  Processando todas as {len(images)} páginas")
+                    
+                    # Salvar o OUTPUT_CSV original antes do loop
+                    original_output_csv = extractor.OUTPUT_CSV
+                    
+                    # Processar cada página
+                    for page_num in pages_to_process:
+                        # Salvar a página como imagem temporária em uma pasta de cache separada
+                        # para que `clear_debug_dir()` dentro de `extractor.main()` não a delete
+                        temp_image_path = PROJECT_ROOT / "debug" / "pdf_cache" / f"pdf_page_{page_num}.png"
+                        temp_image_path.parent.mkdir(parents=True, exist_ok=True)
+                        cv2.imwrite(str(temp_image_path), images[page_num - 1])
+                        
+                        logger.info(f"\n  → Processando página {page_num} de {len(images)}")
+                        extractor.IMAGE_PATH = str(temp_image_path)
+                        
+                        # Ajustar nome do arquivo de saída para incluir número da página
+                        if args.output:
+                            base_output = Path(args.output)
+                        else:
+                            base_output = Path(original_output_csv)
+                        
+                        output_with_page = base_output.parent / f"{base_output.stem}_page{page_num}{base_output.suffix}"
+                        extractor.OUTPUT_CSV = str(output_with_page)
+                        
+                        # Chamar main com parâmetro qr_data para versão QR
+                        if args.qr_data:
+                            extractor.main(qr_data=args.qr_data)
+                        else:
+                            extractor.main()
+                    
+                    logger.info(f"\n✓ Processamento completo: {len(pages_to_process)} página(s) processada(s)")
+                    sys.exit(0)
                     
                 except Exception as e:
                     print(f"Erro ao converter PDF: {e}", file=sys.stderr)
