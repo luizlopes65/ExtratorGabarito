@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-PDF Utilities for OCR Answer Sheet Extractor
+Utilitários de PDF para Extrator de Gabaritos OCR
 
-This module provides utilities to convert PDF files to images for processing.
-Each page of the PDF is converted to a separate image.
+Este módulo fornece utilitários para converter arquivos PDF em imagens para processamento.
+Cada página do PDF é convertida em uma imagem separada.
 """
 
+# pyrefly: ignore [missing-import]
 import numpy as np
+# pyrefly: ignore [missing-import]
 import cv2
 from pathlib import Path
 from typing import List, Optional
+from .profiler import profile_time
 
-
+@profile_time("pdf_to_images")
 def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
+    # pyrefly: ignore [missing-import]
     from pdf2image import convert_from_path
 
     
@@ -21,15 +25,15 @@ def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
     
     try:
-        # Convert PDF pages to PIL images
+        # Converter páginas do PDF para imagens PIL
         pil_images = convert_from_path(str(pdf_file), dpi=dpi)
         
-        # Convert PIL images to OpenCV format (BGR)
+        # Converter imagens PIL para formato OpenCV (BGR)
         cv_images = []
         for pil_img in pil_images:
-            # Convert PIL RGB to numpy array
+            # Converter PIL RGB para array numpy
             rgb_array = np.array(pil_img.convert("RGB"))
-            # Convert RGB to BGR (OpenCV format)
+            # Converter RGB para BGR (formato OpenCV)
             bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
             cv_images.append(bgr_array)
         
@@ -108,6 +112,7 @@ def get_pdf_page_count(pdf_path: str) -> int:
         Number of pages in the PDF
     """
     try:
+        # pyrefly: ignore [missing-import]
         from pdf2image import pdfinfo_from_path
         info = pdfinfo_from_path(pdf_path)
         return info.get("Pages", 0)

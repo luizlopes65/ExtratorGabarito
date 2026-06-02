@@ -1,111 +1,114 @@
-# OCR Project - Answer Sheet Digitizer
+# Projeto OCR - Digitalizador de Gabaritos
 
-This project provides tools to automate the extraction of data from multiple-choice answer sheets (gabaritos) using Computer Vision (OpenCV) and Optical Character Recognition (OCR).
+Este projeto fornece ferramentas para automatizar a extração de dados de gabaritos de múltipla escolha usando Visão Computacional (OpenCV) e Reconhecimento Óptico de Caracteres (OCR).
 
-## 🚀 Features
+## 🚀 Funcionalidades
 
-The project implements two versions of the extraction pipeline:
+O projeto implementa duas versões do pipeline de extração:
 
-1.  **Standard Version (`extrair_table_fixed.py`)**:
-    *   **Automatic Preprocessing**: Corrects image rotation (skew) and performs perspective transformation to flatten the document.
-    *   **Adaptive Grid Detection**: Automatically detects table lines to identify columns (questions) and rows (students).
-    *   **Smart OCR with Pattern Inference**: Extracts question headers and student names with intelligent error correction for multi-part questions (e.g., 35-A, 35-B, 36-A, 36-B).
-    *   **Advanced Bubble Detection**: Uses circularity and intensity analysis to determine if a bubble is filled, providing confidence and density scores.
-    *   **CSV Output**: Exports results, confidence scores, and density metrics to CSV files.
+1.  **Versão Padrão (`extrair_table_fixed.py`)**:
+    *   **Pré-processamento Automático**: Corrige rotação da imagem (skew) e realiza transformação de perspectiva para achatar o documento.
+    *   **Detecção Adaptativa de Grade**: Detecta automaticamente as linhas da tabela para identificar colunas (questões) e linhas (alunos).
+    *   **OCR Inteligente com Inferência de Padrões**: Extrai cabeçalhos de questões e nomes de alunos com correção inteligente de erros para questões com múltiplas partes (ex: 35-A, 35-B, 36-A, 36-B).
+    *   **Detecção Avançada de Bolhas**: Usa análise de circularidade e intensidade para determinar se uma bolha está preenchida, fornecendo pontuações de confiança e densidade.
+    *   **Saída em CSV**: Exporta resultados, pontuações de confiança e métricas de densidade para arquivos CSV.
 
-2.  **Profiling Version (`extrair_table_profiling.py`)**:
-    *   All features from the standard version
-    *   **Parallel OCR Processing**: Uses ThreadPoolExecutor for faster header and name extraction
-    *   **Performance Metrics**: Detailed profiling reports showing execution time per function and layer
-    *   **cProfile Integration**: Generates detailed performance profiles for optimization
+2.  **Versão com Profiling (`extrair_table_profiling.py`)**:
+    *   Todas as funcionalidades da versão padrão
+    *   **Processamento OCR Paralelo**: Usa ThreadPoolExecutor para extração mais rápida de cabeçalhos e nomes
+    *   **Métricas de Performance**: Relatórios detalhados de profiling mostrando tempo de execução por função e camada
+    *   **Integração com cProfile**: Gera perfis de performance detalhados para otimização
 
-## ✨ Recent Improvements
+## ✨ Melhorias Recentes
 
-- **Fixed Question Pairing**: Enhanced OCR to correctly handle multi-part questions (35-A, 35-B, 36-A, 36-B, etc.)
-- **Pattern-Based Inference**: Automatically corrects OCR errors by detecting question number sequences
-- **Improved Header Detection**: Better extraction of question identifiers with letter suffixes
-- **Unified Main Entry Point**: Simple CLI interface to run either version
+- **Correção de Pareamento de Questões**: OCR aprimorado para lidar corretamente com questões de múltiplas partes (35-A, 35-B, 36-A, 36-B, etc.)
+- **Inferência Baseada em Padrões**: Corrige automaticamente erros de OCR detectando sequências de números de questões
+- **Detecção Aprimorada de Cabeçalhos**: Melhor extração de identificadores de questões com sufixos de letras
+- **Ponto de Entrada Principal Unificado**: Interface CLI simples para executar qualquer versão
 
-## 🛠️ Prerequisites
+## 🛠️ Pré-requisitos
 
 ### Tesseract OCR
-This project relies on Tesseract for text recognition.
+Este projeto depende do Tesseract para reconhecimento de texto.
 *   **macOS**: `brew install tesseract`
 *   **Linux**: `sudo apt install tesseract-ocr`
-*   **Windows**: Install Tesseract and update the `TESSERACT_CMD` path in the scripts.
+*   **Windows**: Instale o Tesseract e atualize o caminho `TESSERACT_CMD` nos scripts.
 
-## 📦 Installation
+## 📦 Instalação
 
-1.  **Clone the repository**:
+1.  **Clone o repositório**:
     ```bash
     git clone <repository-url>
     cd OCR_Project
     ```
 
-2.  **Install dependencies**:
-    Using Poetry (recommended):
+2.  **Instale as dependências**:
+    Usando Poetry (recomendado):
     ```bash
     poetry install
     ```
-    Or using pip:
+    Ou usando pip:
     ```bash
     pip install -r requirements.txt
     ```
 
-3.  **Configure environment** (optional):
+3.  **Configure o ambiente** (opcional):
     ```bash
     cp .env.example .env
-    # Edit .env to customize paths and parameters
+    # Edite .env para personalizar caminhos e parâmetros
     ```
     
-    The `.env` file allows you to configure:
-    - Input/output paths
-    - Tesseract location
-    - Grid detection parameters
-    - Bubble detection thresholds
-    - Profiling settings
+    O arquivo `.env` permite configurar:
+    - Caminhos de entrada/saída
+    - Localização do Tesseract
+    - Parâmetros de detecção de grade
+    - Limiares de detecção de bolhas
+    - Configurações de profiling
 
-## 🖥️ Usage
+## 🖥️ Uso
 
-### Quick Start with main.py
+### Início Rápido com main.py
 
-The easiest way to run the extractor:
+A maneira mais fácil de executar o extrator:
 
-#### Single Image Processing
+#### Processamento de Imagem Única
 
 ```bash
-# Run standard version (default)
-poetry run python main.py
+# Executar versão padrão (default)
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf
 
-# Run with profiling enabled
-poetry run python main.py --profile
+# Para depurar imagens visuais (grade, bolhas, QR) na pasta debug/:
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --debug
 
-# Specify custom image path
-poetry run python main.py --image examples/my_sheet.png
-
-# Run profiling with custom output
-poetry run python main.py --profile --output resultados/custom_output.csv
-
-# Enable debug images (profiling version only)
-poetry run python main.py --profile --debug
+# Para ver o log detalhado no terminal durante a execução:
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --verbose
 ```
 
-#### Batch Processing (Multiple Images)
+#### Processamento em Lote (Múltiplas Imagens)
 
-Process all images in a folder at once:
+Processe todas as imagens em uma pasta de uma vez:
 
 ```bash
-# Process all images in examples/ folder
+# Processar todas as imagens na pasta examples/
 poetry run python main.py --batch examples/
 
-# Batch process with profiling
+# Processamento em lote com profiling
 poetry run python main.py --profile --batch examples/
 
-# Specify custom output directory
+# Especificar diretório de saída customizado
 poetry run python main.py --batch examples/ --output-dir resultados/my_batch/
 ```
 
-**Batch Output Structure:**
+#### Execução Completa do Pipeline (Ponta a Ponta)
+
+Você pode executar o pipeline completo—desde a extração OCR da imagem até o upload para Google Sheets—com um único comando. Isso processará todas as imagens, criará uma tabela mestre e fará upload das estatísticas agregadas.
+
+```bash
+# Executar o pipeline completo
+poetry run python main.py --full examples/
+```
+
+**Estrutura de Saída em Lote:**
 ```
 resultados/batch/
 ├── image1/
@@ -118,111 +121,117 @@ resultados/batch/
 │   ├── resultado_confianca.csv
 │   ├── resultado_densidade.csv
 │   └── debug/
-└── summary.txt              # Processing summary with statistics
+└── summary.txt              # Resumo do processamento com estatísticas
 ```
 
-The `summary.txt` file contains:
-- Total images processed
-- Success/failure counts
-- Processing time per image (profiling version)
-- Detailed status for each image
+O arquivo `summary.txt` contém:
+- Total de imagens processadas
+- Contagem de sucessos/falhas
+- Tempo de processamento por imagem (versão profiling)
+- Status detalhado para cada imagem
 
-### Direct Script Execution
+### Execução Direta de Scripts
 
-You can also run the scripts directly:
+Você também pode executar os scripts diretamente:
 
 ```bash
-# Standard version
+# Versão padrão
 poetry run python extrair_table_fixed.py
 
-# Profiling version
+# Versão profiling
 poetry run python extrair_table_profiling.py
 ```
 
-*   Update `IMAGE_PATH` at the top of the file to point to your input image.
-*   Check the `debug/` folder for visual debugging stages.
+*   Atualize `IMAGE_PATH` no topo do arquivo para apontar para sua imagem de entrada.
+*   Verifique a pasta `debug/` para estágios visuais de depuração.
 
-## 📂 Project Structure
+## 📂 Estrutura do Projeto
 
 ```
 OCR_Project/
-├── main.py                      # CLI entry point
-├── extrair_table_fixed.py       # Standard extraction pipeline
-├── extrair_table_profiling.py   # Profiling version with performance metrics
-├── pyproject.toml               # Poetry dependencies
-├── requirements.txt             # Pip dependencies
-├── examples/                    # Sample answer sheet images
-│   └── image.png
-├── resultados/                  # Output CSV files
-├── debug/                       # Debug images (grid detection, OCR, etc.)
-├── archive/                     # Archived/unused code
-└── AGENTS.md                    # Development guidelines for AI agents
+- `pipeline/main.py`: Ponto de entrada CLI (trata PDFs, argumentos e chamadas em lote).
+- `pipeline/helpers/extrair_table_qr.py`: Orquestrador principal da extração.
+- `pipeline/helpers/qr_parser.py`: Detecção e extração de metadados do QR Code.
+- `pipeline/helpers/grid_detector.py`: Lógica de OpenCV para detecção da grade da tabela.
+- `pipeline/helpers/bubble_analyzer.py`: Identificação de preenchimento das bolhas.
+- `pipeline/helpers/geometry.py`: Processamento geométrico (crop, transformações).
+- `pipeline/helpers/ocr_utils.py`: Funções de limpeza de OCR e texto.
+- `pipeline/helpers/logger.py`: Configuração de logs (`--verbose`).
+├── update_cloud_statistics.py   # Agrega estatísticas da tabela mestre e faz upload para Google Sheets
+├── google_sheets_utils.py       # Mapeamento de coordenadas de células para integração com Google Sheets
+├── pyproject.toml               # Dependências do Poetry
+├── requirements.txt             # Dependências do Pip
+├── examples/                    # Imagens de exemplo de gabaritos
+├── resultados/                  # Arquivos CSV de saída
+├── debug/                       # Imagens de debug (detecção de grade, OCR, etc.)
+├── archive/                     # Código arquivado (ex: teste.py, populate_matrix.py, etc.)
+└── AGENTS.md                    # Diretrizes de desenvolvimento para agentes de IA
 ```
 
-## 📊 Output Files
+## 📊 Arquivos de Saída
 
-The extractor generates three CSV files:
+O extrator gera três arquivos CSV:
 
-1. **Main Results** (`resultado_gabarito_v3.csv`): Student names and their selected answers
-2. **Confidence Scores** (`resultado_gabarito_v3_confianca.csv`): Confidence level for each answer detection
-3. **Density Metrics** (`resultado_gabarito_v3_densidade.csv`): Fill density for each bubble
+1. **Resultados Principais** (`resultado_gabarito_v3.csv`): Nomes dos alunos e suas respostas selecionadas
+2. **Pontuações de Confiança** (`resultado_gabarito_v3_confianca.csv`): Nível de confiança para cada detecção de resposta
+3. **Métricas de Densidade** (`resultado_gabarito_v3_densidade.csv`): Densidade de preenchimento para cada bolha
 
-## 🐛 Debugging
+## 🐛 Depuração
 
-Debug images are saved to the `debug/` directory showing:
-- Preprocessed document (rotation correction, perspective transform)
-- Grid line detection (vertical and horizontal lines)
-- Header cell OCR results
-- Name cell OCR results
-- Bubble detection for each answer cell
+Imagens de debug são salvas no diretório `debug/` mostrando:
+- Documento pré-processado (correção de rotação, transformação de perspectiva)
+- Detecção de linhas da grade (linhas verticais e horizontais)
+- Resultados de OCR das células de cabeçalho
+- Resultados de OCR das células de nome
+- Detecção de bolhas para cada célula de resposta
 
-## 🔧 Configuration
+## 🔧 Configuração
 
-### Using .env File (Recommended)
+### Usando Arquivo .env (Recomendado)
 
-Create a `.env` file from the template:
+Crie um arquivo `.env` a partir do template:
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` to customize:
+Edite `.env` para personalizar:
 
-**Paths:**
-- `IMAGE_PATH`: Input answer sheet image
-- `OUTPUT_CSV`: Output CSV file (generates 3 files: main, confidence, density)
-- `DEBUG_DIR`: Directory for debug images
-- `TESSERACT_CMD`: Path to Tesseract executable
+**Caminhos:**
+- `IMAGE_PATH`: Imagem de entrada do gabarito
+- `OUTPUT_CSV`: Arquivo CSV de saída (gera 3 arquivos: principal, confiança, densidade)
+- `DEBUG_DIR`: Diretório para imagens de debug
+- `TESSERACT_CMD`: Caminho para o executável do Tesseract
 
-**Grid Detection:**
-- `ROW_HEIGHT_MIN`: Minimum row height in pixels (default: 30)
-- `COL_WIDTH_MIN`: Minimum column width in pixels (default: 25)
-- `GRID_CLUSTER_TOLERANCE`: Tolerance for clustering grid lines (default: 12)
+**Detecção de Grade:**
+- `ROW_HEIGHT_MIN`: Altura mínima da linha em pixels (padrão: 30)
+- `COL_WIDTH_MIN`: Largura mínima da coluna em pixels (padrão: 25)
+- `GRID_CLUSTER_TOLERANCE`: Tolerância para agrupamento de linhas da grade (padrão: 12)
 
-**Bubble Detection:**
-- `MIN_FILL_DENSITY`: Threshold for bubble fill detection, 0.03-0.08 (default: 0.05)
-- `MIN_INNER_DIFF`: Minimum intensity difference for answer selection (default: 5)
-- `MAX_SECOND_RATIO`: Maximum ratio for double marking detection (default: 0.65)
+**Detecção de Bolhas:**
+- `MIN_FILL_DENSITY`: Limiar para detecção de preenchimento de bolha, 0.03-0.08 (padrão: 0.05)
+- `MIN_INNER_DIFF`: Diferença mínima de intensidade para seleção de resposta (padrão: 5)
+- `MAX_SECOND_RATIO`: Razão máxima para detecção de marcação dupla (padrão: 0.65)
 
-**Profiling (profiling version only):**
-- `OCR_MAX_WORKERS`: Number of parallel OCR workers (default: 4)
-- `ENABLE_DEBUG_IMAGES`: Generate debug images (true/false)
-- `PROFILE_DETAILED`: Enable detailed profiling metrics (true/false)
+**Profiling (apenas versão profiling):**
+- `OCR_MAX_WORKERS`: Número de workers OCR paralelos (padrão: 4)
+- `ENABLE_DEBUG_IMAGES`: Gerar imagens de debug (true/false)
+- `PROFILE_DETAILED`: Habilitar métricas detalhadas de profiling (true/false)
 
-### Direct Script Configuration
+### Configuração Direta de Script
 
-Alternatively, you can edit parameters directly at the top of each script file.
+Alternativamente, você pode editar os parâmetros diretamente no topo de cada arquivo de script.
 
-## 📝 Supported Question Formats
+## 📝 Formatos de Questões Suportados
 
-The extractor handles various question numbering formats:
-- Simple sequential: `1, 2, 3, 4, ...`
-- Multi-part questions: `35-A, 35-B, 36-A, 36-B, ...`
-- Mixed formats: `1, 2, 3, 47, 5, 64-A, 64-B, ...`
+O extrator lida com vários formatos de numeração de questões:
+- Sequencial simples: `1, 2, 3, 4, ...`
+- Questões de múltiplas partes: `35-A, 35-B, 36-A, 36-B, ...`
+- Formatos mistos: `1, 2, 3, 47, 5, 64-A, 64-B, ...`
 
-## 🤝 Contributing
+## 🤝 Contribuindo
 
-See `AGENTS.md` for development guidelines and architecture details.
+Veja `AGENTS.md` para diretrizes de desenvolvimento e detalhes da arquitetura.
 
-## 📄 License
+## 📄 Licença
 
-[Add your license information here]
+[Adicione suas informações de licença aqui]

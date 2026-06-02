@@ -10,14 +10,16 @@ Scoring: B=0, 1=0, 2 or 3=+1
 
 import pandas as pd
 import csv
+# pyrefly: ignore [missing-import]
 import gspread
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
 
-# Import functions from teste.py
-from teste import (
+# Import functions from google_sheets_utils.py
+# pyrefly: ignore [missing-import]
+from helpers.google_sheets_utils import (
     obter_coordenada,
     resolver_ancora,
     col_letra_para_indice,
@@ -164,27 +166,19 @@ def batch_update_sheets(
     return success, failed
 
 
-def main():
-    """Main execution."""
-    
-    # Paths
-    MASTER_TABLE = 'my_results/master_table.csv'
-    MATRIX_CSV = 'matriz_assuntos_subatributos_populated.csv'
-    CREDENTIALS = 'credenciais.json'
-    SHEET_ID = '1v21Q3TKPkJuf08HvwpMmZ6IYwa6Wsht2S4OvlKmenfc'
-    WORKSHEET_INDEX = 2
-    
+def run_update(master_table_path: str, matrix_csv_path: str, credentials_path: str, sheet_id: str, worksheet_index: int = 2):
+    """Run the cloud statistics update pipeline."""
     print("=" * 60)
     print("📊 UPDATE CLOUD STATISTICS")
     print("=" * 60)
     
     # Step 1: Parse question mappings
     print("\n1️⃣  Parsing question mappings...")
-    question_mappings = parse_question_mappings(MATRIX_CSV)
+    question_mappings = parse_question_mappings(matrix_csv_path)
     
     # Step 2: Calculate statistics
     print("\n2️⃣  Calculating question statistics...")
-    question_stats = calculate_question_statistics(MASTER_TABLE)
+    question_stats = calculate_question_statistics(master_table_path)
     
     # Step 3: Aggregate by cell
     print("\n3️⃣  Aggregating by cell...")
@@ -193,9 +187,9 @@ def main():
     # Step 4: Connect to Google Sheets
     print("\n4️⃣  Connecting to Google Sheets...")
     try:
-        gc = gspread.service_account(filename=CREDENTIALS)
-        sheet = gc.open_by_key(SHEET_ID)
-        aba = sheet.get_worksheet(WORKSHEET_INDEX)
+        gc = gspread.service_account(filename=credentials_path)
+        sheet = gc.open_by_key(sheet_id)
+        aba = sheet.get_worksheet(worksheet_index)
         print("  ✅ Connected!")
     except Exception as e:
         print(f"  ❌ Connection failed: {e}")
@@ -208,6 +202,18 @@ def main():
     print("\n" + "=" * 60)
     print("✅ UPDATE COMPLETE!")
     print("=" * 60)
+
+
+def main():
+    """CLI execution."""
+    # Default Paths
+    MASTER_TABLE = 'my_results/master_table.csv'
+    MATRIX_CSV = 'matriz_assuntos_subatributos_populated.csv'
+    CREDENTIALS = 'credenciais.json'
+    SHEET_ID = '1v21Q3TKPkJuf08HvwpMmZ6IYwa6Wsht2S4OvlKmenfc'
+    WORKSHEET_INDEX = 2
+    
+    run_update(MASTER_TABLE, MATRIX_CSV, CREDENTIALS, SHEET_ID, WORKSHEET_INDEX)
 
 
 if __name__ == '__main__':
