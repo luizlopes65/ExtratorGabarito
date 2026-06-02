@@ -1,23 +1,16 @@
 # Projeto OCR - Digitalizador de Gabaritos
 
 Este projeto fornece ferramentas para automatizar a extração de dados de gabaritos de múltipla escolha usando Visão Computacional (OpenCV) e Reconhecimento Óptico de Caracteres (OCR).
-
 ## 🚀 Funcionalidades
 
-O projeto implementa duas versões do pipeline de extração:
+O projeto implementa um pipeline de extração baseado em QR Code:
 
-1.  **Versão Padrão (`extrair_table_fixed.py`)**:
-    *   **Pré-processamento Automático**: Corrige rotação da imagem (skew) e realiza transformação de perspectiva para achatar o documento.
-    *   **Detecção Adaptativa de Grade**: Detecta automaticamente as linhas da tabela para identificar colunas (questões) e linhas (alunos).
-    *   **OCR Inteligente com Inferência de Padrões**: Extrai cabeçalhos de questões e nomes de alunos com correção inteligente de erros para questões com múltiplas partes (ex: 35-A, 35-B, 36-A, 36-B).
-    *   **Detecção Avançada de Bolhas**: Usa análise de circularidade e intensidade para determinar se uma bolha está preenchida, fornecendo pontuações de confiança e densidade.
-    *   **Saída em CSV**: Exporta resultados, pontuações de confiança e métricas de densidade para arquivos CSV.
-
-2.  **Versão com Profiling (`extrair_table_profiling.py`)**:
-    *   Todas as funcionalidades da versão padrão
-    *   **Processamento OCR Paralelo**: Usa ThreadPoolExecutor para extração mais rápida de cabeçalhos e nomes
-    *   **Métricas de Performance**: Relatórios detalhados de profiling mostrando tempo de execução por função e camada
-    *   **Integração com cProfile**: Gera perfis de performance detalhados para otimização
+**Versão QR (`extrair_table_qr.py`)**:
+*   **Detecção de QR Code**: Localiza e decodifica QR codes no documento para extrair metadados (número de questões, opções, etc.)
+*   **Pré-processamento Automático**: Corrige rotação da imagem (skew) e realiza transformação de perspectiva para achatar o documento.
+*   **Detecção Adaptativa de Grade**: Detecta automaticamente as linhas da tabela para identificar colunas (questões) e linhas (alunos).
+*   **Detecção Avançada de Bolhas**: Usa análise de circularidade e intensidade para determinar se uma bolha está preenchida, fornecendo pontuações de confiança e densidade.
+*   **Saída em CSV**: Exporta resultados, pontuações de confiança e métricas de densidade para arquivos CSV.
 
 ## ✨ Melhorias Recentes
 
@@ -71,110 +64,133 @@ Este projeto depende do Tesseract para reconhecimento de texto.
 
 A maneira mais fácil de executar o extrator:
 
-#### Processamento de Imagem Única
+#### Processamento de PDF
 
 ```bash
-# Executar versão padrão (default)
+# Processar TODAS as páginas de um PDF (padrão)
 poetry run python pipeline/main.py --image examples/seu_gabarito.pdf
 
-# Para depurar imagens visuais (grade, bolhas, QR) na pasta debug/:
-poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --debug
+# Processar apenas uma página específica
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --pdf-page 2
 
-# Para ver o log detalhado no terminal durante a execução:
+# Com logs detalhados
 poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --verbose
+
+# Com imagens de debug
+poetry run python pipeline/main.py --image examples/seu_gabarito.pdf --debug
 ```
+
+**Nota:** Quando você passa um PDF sem especificar `--pdf-page`, o sistema processa automaticamente TODAS as páginas do PDF, gerando um arquivo CSV separado para cada página (ex: `resultado_gabarito_qr_page1.csv`, `resultado_gabarito_qr_page2.csv`, etc.).
 
 #### Processamento em Lote (Múltiplas Imagens)
 
 Processe todas as imagens em uma pasta de uma vez:
 
 ```bash
-# Processar todas as imagens na pasta examples/
-poetry run python main.py --batch examples/
-
-# Processamento em lote com profiling
-poetry run python main.py --profile --batch examples/
+# Processar todas as imagens e PDFs na pasta examples/
+poetry run python pipeline/main.py --batch examples/
 
 # Especificar diretório de saída customizado
-poetry run python main.py --batch examples/ --output-dir resultados/my_batch/
+poetry run python pipeline/main.py --batch examples/ --output-dir resultados/my_batch/
 ```
+
+**Nota:** O modo batch processa automaticamente todas as páginas de cada PDF encontrado na pasta.
 
 #### Execução Completa do Pipeline (Ponta a Ponta)
 
-Você pode executar o pipeline completo—desde a extração OCR da imagem até o upload para Google Sheets—com um único comando. Isso processará todas as imagens, criará uma tabela mestre e fará upload das estatísticas agregadas.
+Você pode executar o pipeline completo—desde a extração OCR da imagem até o upload para Google Sheets—com um único comando. Isso processará todas as imagens e PDFs, criará uma **tabela mestre consolidada** e fará upload das estatísticas agregadas para o Google Sheets.
 
 ```bash
 # Executar o pipeline completo
-poetry run python main.py --full examples/
+poetry run python pipeline/main.py --full examples/
 ```
 
-**Estrutura de Saída em Lote:**
+**O que o pipeline completo faz:**
+1. Processa todos os PDFs e todas as páginas na pasta especificada
+2. Gera CSVs individuais para cada página
+3. **Cria uma tabela mestre** (`master_table.csv`) consolidando todos os resultados
+4. Agrega estatísticas por assunto matemático
+5. **Faz upload automático para Google Sheets** usando as credenciais configuradas
+
+**Requisitos para o pipeline completo:**
+- Arquivo `credenciais.json` na raiz do projeto (credenciais da API do Google Sheets)
+- Arquivo `matriz_assuntos_subatributos_populated.csv` (matriz de assuntos matemáticos)
+- ID da planilha do Google Sheets configurado no código
+
+**Estrutura de Saída:**
+
+Para processamento de PDF único:
+```
+resultados/
+├── resultado_gabarito_qr_page1.csv
+├── resultado_gabarito_qr_page1_confianca.csv
+├── resultado_gabarito_qr_page1_densidade.csv
+├── resultado_gabarito_qr_page2.csv
+├── resultado_gabarito_qr_page2_confianca.csv
+├── resultado_gabarito_qr_page2_densidade.csv
+└── ...
+```
+
+Para processamento em lote:
 ```
 resultados/batch/
-├── image1/
-│   ├── resultado.csv
-│   ├── resultado_confianca.csv
-│   ├── resultado_densidade.csv
+├── pdf1_page1/
+│   ├── resultado_metadata.json
 │   └── debug/
-├── image2/
-│   ├── resultado.csv
-│   ├── resultado_confianca.csv
-│   ├── resultado_densidade.csv
+├── pdf1_page2/
+│   ├── resultado_metadata.json
 │   └── debug/
-└── summary.txt              # Resumo do processamento com estatísticas
+├── summary.txt              # Resumo do processamento
+└── master_table.csv         # Tabela mestre consolidada (gerada com --full)
 ```
 
 O arquivo `summary.txt` contém:
-- Total de imagens processadas
+- Total de páginas processadas
 - Contagem de sucessos/falhas
-- Tempo de processamento por imagem (versão profiling)
-- Status detalhado para cada imagem
+- Status detalhado para cada página
 
-### Execução Direta de Scripts
-
-Você também pode executar os scripts diretamente:
-
-```bash
-# Versão padrão
-poetry run python extrair_table_fixed.py
-
-# Versão profiling
-poetry run python extrair_table_profiling.py
-```
-
-*   Atualize `IMAGE_PATH` no topo do arquivo para apontar para sua imagem de entrada.
-*   Verifique a pasta `debug/` para estágios visuais de depuração.
+O arquivo `master_table.csv` (gerado apenas com `--full`):
+- Consolida todos os resultados de todas as páginas processadas
+- Usado para agregação de estatísticas por assunto
+- Base para upload ao Google Sheets
 
 ## 📂 Estrutura do Projeto
 
 ```
-OCR_Project/
-- `pipeline/main.py`: Ponto de entrada CLI (trata PDFs, argumentos e chamadas em lote).
-- `pipeline/helpers/extrair_table_qr.py`: Orquestrador principal da extração.
-- `pipeline/helpers/qr_parser.py`: Detecção e extração de metadados do QR Code.
-- `pipeline/helpers/grid_detector.py`: Lógica de OpenCV para detecção da grade da tabela.
-- `pipeline/helpers/bubble_analyzer.py`: Identificação de preenchimento das bolhas.
-- `pipeline/helpers/geometry.py`: Processamento geométrico (crop, transformações).
-- `pipeline/helpers/ocr_utils.py`: Funções de limpeza de OCR e texto.
-- `pipeline/helpers/logger.py`: Configuração de logs (`--verbose`).
-├── update_cloud_statistics.py   # Agrega estatísticas da tabela mestre e faz upload para Google Sheets
-├── google_sheets_utils.py       # Mapeamento de coordenadas de células para integração com Google Sheets
-├── pyproject.toml               # Dependências do Poetry
-├── requirements.txt             # Dependências do Pip
-├── examples/                    # Imagens de exemplo de gabaritos
-├── resultados/                  # Arquivos CSV de saída
-├── debug/                       # Imagens de debug (detecção de grade, OCR, etc.)
-├── archive/                     # Código arquivado (ex: teste.py, populate_matrix.py, etc.)
-└── AGENTS.md                    # Diretrizes de desenvolvimento para agentes de IA
+OCR_Project/old_document_type/
+├── pipeline/
+│   ├── main.py                              # Ponto de entrada CLI principal
+│   └── helpers/
+│       ├── extrair_table_qr.py              # Orquestrador da extração
+│       ├── qr_parser.py                     # Detecção e parsing de QR Code
+│       ├── grid_detector.py                 # Detecção de grade da tabela
+│       ├── bubble_analyzer.py               # Análise de bolhas preenchidas
+│       ├── geometry.py                      # Transformações geométricas
+│       ├── ocr_utils.py                     # Utilitários de OCR
+│       ├── pdf_utils.py                     # Conversão de PDF para imagem
+│       ├── logger.py                        # Sistema de logging
+│       ├── create_master_table.py           # Criação da tabela mestre
+│       ├── update_cloud_statistics.py       # Upload para Google Sheets
+│       └── google_sheets_utils.py           # Utilitários do Google Sheets
+├── credenciais.json                         # Credenciais da API Google Sheets (necessário para --full)
+├── matriz_assuntos_subatributos_populated.csv  # Matriz de assuntos matemáticos
+├── pyproject.toml                           # Dependências do Poetry
+├── requirements.txt                         # Dependências do Pip
+├── examples/                                # PDFs de exemplo
+├── resultados/                              # Arquivos CSV de saída
+├── debug/                                   # Imagens de debug
+└── AGENTS.md                                # Diretrizes de desenvolvimento
 ```
 
 ## 📊 Arquivos de Saída
 
-O extrator gera três arquivos CSV:
+O extrator gera três arquivos CSV por página processada:
 
-1. **Resultados Principais** (`resultado_gabarito_v3.csv`): Nomes dos alunos e suas respostas selecionadas
-2. **Pontuações de Confiança** (`resultado_gabarito_v3_confianca.csv`): Nível de confiança para cada detecção de resposta
-3. **Métricas de Densidade** (`resultado_gabarito_v3_densidade.csv`): Densidade de preenchimento para cada bolha
+1. **Resultados Principais** (`resultado_gabarito_qr_pageN.csv`): Nomes dos alunos e suas respostas selecionadas
+2. **Pontuações de Confiança** (`resultado_gabarito_qr_pageN_confianca.csv`): Nível de confiança para cada detecção de resposta
+3. **Métricas de Densidade** (`resultado_gabarito_qr_pageN_densidade.csv`): Densidade de preenchimento para cada bolha
+
+Onde `N` é o número da página processada.
 
 ## 🐛 Depuração
 
@@ -187,46 +203,53 @@ Imagens de debug são salvas no diretório `debug/` mostrando:
 
 ## 🔧 Configuração
 
-### Usando Arquivo .env (Recomendado)
+### Configuração via Linha de Comando
 
-Crie um arquivo `.env` a partir do template:
+A maneira recomendada de configurar o processamento é através dos argumentos da linha de comando:
+
 ```bash
-cp .env.example .env
+# Especificar arquivo de entrada
+--image <caminho>
+
+# Especificar página do PDF
+--pdf-page <número>
+
+# Especificar diretório de saída
+--output-dir <caminho>
+
+# Habilitar modo verbose
+--verbose
+
+# Habilitar imagens de debug
+--debug
 ```
 
-Edite `.env` para personalizar:
+### Configuração para Google Sheets (Pipeline Completo)
 
-**Caminhos:**
-- `IMAGE_PATH`: Imagem de entrada do gabarito
-- `OUTPUT_CSV`: Arquivo CSV de saída (gera 3 arquivos: principal, confiança, densidade)
+Para usar o pipeline completo (`--full`), você precisa configurar:
+
+1. **Credenciais do Google Sheets:**
+   - Crie um projeto no Google Cloud Console
+   - Ative a API do Google Sheets
+   - Crie credenciais de conta de serviço
+   - Baixe o arquivo JSON de credenciais
+   - Salve como `credenciais.json` na raiz do projeto
+
+2. **ID da Planilha:**
+   - O ID da planilha está configurado em `pipeline/main.py`
+   - Formato: `https://docs.google.com/spreadsheets/d/[SHEET_ID]/edit`
+   - Compartilhe a planilha com o email da conta de serviço
+
+3. **Matriz de Assuntos:**
+   - O arquivo `matriz_assuntos_subatributos_populated.csv` deve estar na raiz
+   - Contém o mapeamento de questões para assuntos matemáticos
+
+### Configuração Padrão
+
+Os valores padrão estão definidos em `pipeline/helpers/extrair_table_qr.py`:
+- `IMAGE_PATH`: Caminho padrão da imagem de entrada
+- `OUTPUT_CSV`: Caminho base para arquivos CSV de saída
 - `DEBUG_DIR`: Diretório para imagens de debug
-- `TESSERACT_CMD`: Caminho para o executável do Tesseract
-
-**Detecção de Grade:**
-- `ROW_HEIGHT_MIN`: Altura mínima da linha em pixels (padrão: 30)
-- `COL_WIDTH_MIN`: Largura mínima da coluna em pixels (padrão: 25)
-- `GRID_CLUSTER_TOLERANCE`: Tolerância para agrupamento de linhas da grade (padrão: 12)
-
-**Detecção de Bolhas:**
-- `MIN_FILL_DENSITY`: Limiar para detecção de preenchimento de bolha, 0.03-0.08 (padrão: 0.05)
-- `MIN_INNER_DIFF`: Diferença mínima de intensidade para seleção de resposta (padrão: 5)
-- `MAX_SECOND_RATIO`: Razão máxima para detecção de marcação dupla (padrão: 0.65)
-
-**Profiling (apenas versão profiling):**
-- `OCR_MAX_WORKERS`: Número de workers OCR paralelos (padrão: 4)
-- `ENABLE_DEBUG_IMAGES`: Gerar imagens de debug (true/false)
-- `PROFILE_DETAILED`: Habilitar métricas detalhadas de profiling (true/false)
-
-### Configuração Direta de Script
-
-Alternativamente, você pode editar os parâmetros diretamente no topo de cada arquivo de script.
-
-## 📝 Formatos de Questões Suportados
-
-O extrator lida com vários formatos de numeração de questões:
-- Sequencial simples: `1, 2, 3, 4, ...`
-- Questões de múltiplas partes: `35-A, 35-B, 36-A, 36-B, ...`
-- Formatos mistos: `1, 2, 3, 47, 5, 64-A, 64-B, ...`
 
 ## 🤝 Contribuindo
 
