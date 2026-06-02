@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PDF Utilities for OCR Answer Sheet Extractor
+Utilitários de PDF para Extrator de Gabaritos OCR
 
-This module provides utilities to convert PDF files to images for processing.
-Each page of the PDF is converted to a separate image.
+Este módulo fornece utilitários para converter arquivos PDF em imagens para processamento.
+Cada página do PDF é convertida em uma imagem separada.
 """
 
 # pyrefly: ignore [missing-import]
@@ -25,15 +25,15 @@ def pdf_to_images(pdf_path: str, dpi: int = 300) -> List[np.ndarray]:
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
     
     try:
-        # Convert PDF pages to PIL images
+        # Converter páginas do PDF para imagens PIL
         pil_images = convert_from_path(str(pdf_file), dpi=dpi)
         
-        # Convert PIL images to OpenCV format (BGR)
+        # Converter imagens PIL para formato OpenCV (BGR)
         cv_images = []
         for pil_img in pil_images:
-            # Convert PIL RGB to numpy array
+            # Converter PIL RGB para array numpy
             rgb_array = np.array(pil_img.convert("RGB"))
-            # Convert RGB to BGR (OpenCV format)
+            # Converter RGB para BGR (formato OpenCV)
             bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
             cv_images.append(bgr_array)
         

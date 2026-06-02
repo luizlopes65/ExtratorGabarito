@@ -104,7 +104,7 @@ Exemplos:
     
     args = parser.parse_args()
     
-    # Validate arguments
+    # Validar argumentos
     if sum(1 for x in [args.batch, args.image, args.full] if x) > 1:
         print("Erro: Não é possível especificar mais de um parâmetro principal simultaneamente (--batch, --image ou --full).", file=sys.stderr)
         sys.exit(1)
@@ -121,25 +121,25 @@ Exemplos:
     from helpers.logger import setup_logger
     logger = setup_logger(args.verbose)
     
-    # Always import the QR-based version
+    # Sempre importa a versão baseada em QR
     # pyrefly: ignore [missing-import]
     from helpers import extrair_table_qr as extractor
     
     if args.profile:
-        logger.info("Running profiling version with performance metrics...")
+        logger.info("Executando versão profiling com métricas de performance...")
         # pyrefly: ignore [missing-import]
         from helpers.profiler import TimeProfiler
         TimeProfiler.enable()
     else:
-        logger.info("Running QR-based version...")
+        logger.info("Executando versão baseada em QR...")
         
     if args.debug:
         extractor.ENABLE_DEBUG_IMAGES = True
     
-    # Run batch or single processing
+    # Executar processamento em lote ou único
     try:
         if args.batch or args.full:
-            # Batch processing mode
+            # Modo de processamento em lote
             batch_folder = Path(args.batch if args.batch else args.full)
             if not batch_folder.exists():
                 print(f"Erro: Pasta não encontrada: {batch_folder}", file=sys.stderr)
@@ -150,16 +150,16 @@ Exemplos:
             
             if args.full:
                 logger.info("\n" + "=" * 60)
-                logger.info("🔄 RUNNING FULL PIPELINE")
+                logger.info("🔄 EXECUTANDO PIPELINE COMPLETO")
                 logger.info("=" * 60)
                 
-                # 1. Create master table
+                # 1. Criar tabela mestre
                 # pyrefly: ignore [missing-import]
                 from helpers.create_master_table import create_master_table
                 master_csv = create_master_table(output_dir)
                 
                 if master_csv:
-                    # 2. Update cloud statistics
+                    # 2. Atualizar estatísticas na nuvem
                     # pyrefly: ignore [missing-import]
                     from helpers.update_cloud_statistics import run_update
                     MATRIX_CSV = str(PROJECT_ROOT / 'matriz_assuntos_subatributos_populated.csv')
@@ -169,29 +169,29 @@ Exemplos:
                     run_update(master_csv, MATRIX_CSV, CREDENTIALS, SHEET_ID)
             
         else:
-            # Single image/PDF processing mode
+            # Modo de processamento de imagem/PDF único
             input_path = args.image if args.image else extractor.IMAGE_PATH
             
-            # Check if input file exists
+            # Verificar se o arquivo de entrada existe
             if not Path(input_path).exists():
                 print(f"Erro: Arquivo de entrada não encontrado: {input_path}", file=sys.stderr)
                 sys.exit(1)
             
-            # Handle PDF input
+            # Tratar entrada de PDF
             if is_pdf_file(input_path):
-                logger.info(f"PDF detected: {input_path}")
+                logger.info(f"PDF detectado: {input_path}")
                 try:
                     images = pdf_to_images(input_path)
-                    logger.info(f"  Converted {len(images)} page(s) from PDF")
+                    logger.info(f"  Convertidas {len(images)} página(s) do PDF")
                     
-                    # Use specified page or first page
+                    # Usar página especificada ou primeira página
                     page_num = args.pdf_page
                     if page_num < 1 or page_num > len(images):
-                        print(f"Error: Page {page_num} out of range (PDF has {len(images)} pages)", file=sys.stderr)
+                        print(f"Erro: Página {page_num} fora do intervalo (PDF tem {len(images)} páginas)", file=sys.stderr)
                         sys.exit(1)
                     
-                    # Save the selected page as temporary image in a separate cache folder
-                    # so that `clear_debug_dir()` inside `extractor.main()` doesn't delete it
+                    # Salvar a página selecionada como imagem temporária em uma pasta de cache separada
+                    # para que `clear_debug_dir()` dentro de `extractor.main()` não a delete
                     temp_image_path = PROJECT_ROOT / "debug" / "pdf_cache" / f"pdf_page_{page_num}.png"
                     temp_image_path.parent.mkdir(parents=True, exist_ok=True)
                     # pyrefly: ignore [missing-import]
@@ -199,28 +199,28 @@ Exemplos:
 
                     cv2.imwrite(str(temp_image_path), images[page_num - 1])
                     
-                    logger.info(f"  Processing page {page_num} of {len(images)}")
+                    logger.info(f"  Processando página {page_num} de {len(images)}")
                     extractor.IMAGE_PATH = str(temp_image_path)
                     
                 except Exception as e:
-                    print(f"Error converting PDF: {e}", file=sys.stderr)
+                    print(f"Erro ao converter PDF: {e}", file=sys.stderr)
                     sys.exit(1)
             else:
-                # Regular image file
+                # Arquivo de imagem regular
                 if args.image:
                     extractor.IMAGE_PATH = args.image
             
             if args.output:
                 extractor.OUTPUT_CSV = args.output
             
-            # Call main with qr_data parameter for QR version
+            # Chamar main com parâmetro qr_data para versão QR
             if args.qr_data:
                 extractor.main(qr_data=args.qr_data)
             else:
                 extractor.main()
             
     except Exception as e:
-        print(f"Error during extraction: {e}", file=sys.stderr)
+        print(f"Erro durante a extração: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
         sys.exit(1)

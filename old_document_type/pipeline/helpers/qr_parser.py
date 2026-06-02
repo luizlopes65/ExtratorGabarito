@@ -12,8 +12,8 @@ from .geometry import crop
 @profile_time("detect_qr_code")
 def detect_qr_code(img: np.ndarray) -> Optional[str]:
     """
-    Detect and decode QR code from the top-left corner of the image.
-    Uses multiple preprocessing techniques for robust detection.
+    Detecta e decodifica código QR do canto superior esquerdo da imagem.
+    Usa múltiplas técnicas de pré-processamento para detecção robusta.
     """
     h, w = img.shape[:2]
     regions_to_try = [
@@ -50,8 +50,8 @@ def detect_qr_code(img: np.ndarray) -> Optional[str]:
 
 def parse_qr_data(qr_data: str) -> Tuple[List[str], List[str], List[str], dict]:
     """
-    Parse QR code data to extract question numbers, student IDs, and metadata.
-    Expected format (new): "F;ID_PROF;ID_ESCOLA;ANO_ESCOLAR;BIMESTRE;DATA;QUESTÕES_DETALHADAS;IDS_ALUNOS;PÁGINA"
+    Analisa dados do código QR para extrair números de questões, IDs de alunos e metadados.
+    Formato esperado (novo): "F;ID_PROF;ID_ESCOLA;ANO_ESCOLAR;BIMESTRE;DATA;QUESTÕES_DETALHADAS;IDS_ALUNOS;PÁGINA"
     """
     metadata = {
         'id_prof': None, 'id_escola': None, 'ano_escolar': None,

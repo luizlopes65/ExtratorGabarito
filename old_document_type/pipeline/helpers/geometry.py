@@ -12,7 +12,7 @@ def to_gray(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 def crop(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, pad: int = 0) -> Optional[np.ndarray]:
-    """Crop with padding, gracefully reducing pad if the cell is too small."""
+    """Recorta com padding, reduzindo graciosamente o pad se a célula for muito pequena."""
     while pad >= 0:
         cx1 = max(0, x1 + pad)
         cy1 = max(0, y1 + pad)
