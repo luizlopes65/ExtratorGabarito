@@ -119,7 +119,15 @@ Exemplos:
     # Configurar o logger
     # pyrefly: ignore [missing-import]
     from helpers.logger import setup_logger
-    logger = setup_logger(args.verbose)
+    
+    # Definir caminho do arquivo de log
+    log_file = str(PROJECT_ROOT / "pipeline_errors.log")
+    logger = setup_logger(args.verbose, log_file=log_file)
+    
+    # Adicionar separador no início de cada execução
+    logger.info("\n" + "=" * 80)
+    logger.info(f"🚀 Iniciando pipeline OCR - {Path.cwd()}")
+    logger.info("=" * 80)
     
     # Sempre importa a versão baseada em QR
     # pyrefly: ignore [missing-import]

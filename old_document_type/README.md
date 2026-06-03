@@ -60,6 +60,37 @@ Este projeto depende do Tesseract para reconhecimento de texto.
 
 ## 🖥️ Uso
 
+### 🎯 Modo Interativo (Recomendado)
+
+A maneira mais fácil e intuitiva de usar o pipeline é através do menu interativo:
+
+```bash
+poetry run python pipeline/cli_menu.py
+```
+
+Isso abrirá um menu com as seguintes opções:
+- **Opção 1**: Pipeline COMPLETO (OCR + Master Table + Upload para Google Sheets)
+- **Opção 2**: Apenas OCR (gera CSVs individuais)
+- **Opção 3**: Apenas Master Table (consolida CSVs existentes)
+- **Opção 4**: Apenas Upload (envia Master Table para Google Sheets)
+
+**Exemplo de uso:**
+```
+🚀 PIPELINE OCR - MENU INTERATIVO
+============================================================
+
+Escolha uma opção:
+  1 - Executar pipeline COMPLETO (OCR + Master Table + Upload)
+  2 - Processar apenas OCR (gerar CSVs individuais)
+  3 - Gerar apenas Master Table (a partir de CSVs existentes)
+  4 - Upload para Google Sheets (a partir de Master Table)
+  0 - Sair
+============================================================
+
+Digite sua opção: 1
+Digite o caminho da pasta com os arquivos: examples/
+```
+
 ### Início Rápido com main.py
 
 A maneira mais fácil de executar o extrator:
@@ -241,6 +272,16 @@ Para usar o pipeline completo (`--full`), você precisa configurar:
    - Compartilhe a planilha com o email da conta de serviço
 
 3. **Matriz de Assuntos:**
+
+### Sistema de Pontuação
+
+O sistema de pontuação atual é:
+- **B (Branco)**: 0 pontos
+- **1**: 0 pontos
+- **2**: 1 ponto
+- **3**: 2 pontos
+
+Esta pontuação é aplicada ao agregar estatísticas para upload no Google Sheets.
    - O arquivo `matriz_assuntos_subatributos_populated.csv` deve estar na raiz
    - Contém o mapeamento de questões para assuntos matemáticos
 

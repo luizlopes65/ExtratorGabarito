@@ -271,9 +271,26 @@ def process_single_image(image_path: str, output_csv: str, debug_dir: str) -> bo
         logger.info(f"    - {len(meta['student_names'])} alunos, {len(meta['question_headers_final'])} questões")
         return True
 
+    except RuntimeError as e:
+        # Erro específico de detecção de colunas
+        error_msg = str(e)
+        if "Não foi possível detectar colunas suficientes" in error_msg:
+            logger.error(f"  ❌ Erro ao processar {image_path}: {error_msg}")
+            logger.warning(f"     Arquivo: {image_path}")
+            logger.warning(f"     Motivo: Falha na detecção de estrutura da tabela")
+            logger.warning(f"     Sugestão: Verifique a qualidade da imagem e o alinhamento do documento")
+        else:
+            logger.error(f"  ❌ Erro ao processar {image_path}: {e}")
+        
+        # Log detalhado no arquivo
+        import traceback
+        logger.debug(f"Traceback completo:\n{''.join(traceback.format_exc())}")
+        return False
+    
     except Exception as e:
         logger.error(f"  ❌ Erro ao processar {image_path}: {e}")
         import traceback
+        logger.debug(f"Traceback completo:\n{''.join(traceback.format_exc())}")
         traceback.print_exc()
         return False
 

@@ -3,6 +3,10 @@ debug*
 __*
 *profile*
 
+# Log files
+pipeline_errors.log
+*.log
+
 # Output files
 *.csv
 

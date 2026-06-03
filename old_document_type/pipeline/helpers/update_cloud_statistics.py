@@ -5,7 +5,7 @@ Update Google Sheets with aggregated student performance statistics.
 Reads master_table.csv and matriz_assuntos_subatributos_populated.csv,
 calculates statistics, and updates Google Sheets.
 
-Scoring: B=0, 1=0, 2 or 3=+1
+Scoring: B=0, 1=0, 2=1, 3=2
 """
 
 import pandas as pd
@@ -59,7 +59,7 @@ def parse_question_mappings(csv_path: str) -> Dict[str, List[Tuple[str, str]]]:
 def calculate_question_statistics(master_path: str) -> Dict[str, int]:
     """
     Calculate correct answers per question.
-    Scoring: B=0, 1=0, 2 or 3=+1
+    Scoring: B=0, 1=0, 2=1, 3=2
     
     Returns: {"1": 15, "2": 12, ...}
     """
@@ -72,9 +72,15 @@ def calculate_question_statistics(master_path: str) -> Dict[str, int]:
     stats = {}
     
     for col in question_cols:
-        # Count correct answers (2 or 3)
-        correct = df[col].isin(['2', '3', 2, 3]).sum()
-        stats[col] = int(correct)
+        # Calculate score: B=0, 1=0, 2=1, 3=2
+        score = 0
+        for val in df[col]:
+            val_str = str(val).strip()
+            if val_str == '2':
+                score += 1
+            elif val_str == '3':
+                score += 2
+        stats[col] = score
     
     print(f"📈 Calculated stats for {len(stats)} questions")
     return stats
