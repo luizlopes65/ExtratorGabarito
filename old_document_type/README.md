@@ -90,6 +90,32 @@ Escolha uma opção:
 Digite sua opção: 1
 Digite o caminho da pasta com os arquivos: examples/
 ```
+**Detalhes das Opções:**
+
+**Opção 1 - Pipeline Completo:**
+- Processa todos os PDFs/imagens da pasta (OCR)
+- Gera CSVs individuais para cada página
+- Cria a tabela mestre consolidada
+- Calcula estatísticas com o novo sistema de pontuação (B=0, 1=0, 2=1, 3=2)
+- Faz upload automático para Google Sheets
+
+**Opção 2 - Apenas OCR:**
+- Processa todos os PDFs/imagens da pasta
+- Gera CSVs individuais (resultado.csv, confianca.csv, densidade.csv)
+- Salva metadados em JSON
+- Útil quando você só quer extrair os dados sem consolidar
+
+**Opção 3 - Apenas Master Table:**
+- Consolida CSVs existentes em uma única tabela
+- Útil quando você já processou os arquivos e quer apenas consolidar
+- Solicita o diretório com os resultados (padrão: resultados/batch)
+
+**Opção 4 - Apenas Upload:**
+- Envia uma Master Table existente para Google Sheets
+- Aplica o sistema de pontuação (B=0, 1=0, 2=1, 3=2)
+- Agrega estatísticas por assunto/subatributo
+- Útil para re-enviar dados ou atualizar a planilha
+
 
 ### Início Rápido com main.py
 
@@ -275,16 +301,85 @@ Para usar o pipeline completo (`--full`), você precisa configurar:
 
 ### Sistema de Pontuação
 
-O sistema de pontuação atual é:
-- **B (Branco)**: 0 pontos
-- **1**: 0 pontos
-- **2**: 1 ponto
-- **3**: 2 pontos
+O sistema de pontuação foi atualizado para refletir melhor o desempenho dos alunos:
 
-Esta pontuação é aplicada ao agregar estatísticas para upload no Google Sheets.
+| Resposta | Pontos | Significado |
+|----------|--------|-------------|
+| **B** (Branco) | 0 | Questão não respondida |
+| **1** | 0 | Resposta incorreta |
+| **2** | 1 | Resposta parcialmente correta |
+| **3** | 2 | Resposta totalmente correta |
+
+**Como funciona:**
+- Quando um aluno marca **2** em uma questão, adiciona **1 ponto** ao total da planilha
+- Quando um aluno marca **3** em uma questão, adiciona **2 pontos** ao total da planilha
+- Respostas **B** (branco) ou **1** não adicionam pontos
+
+**Exemplo prático:**
+Se 10 alunos responderam a questão 5:
+- 3 alunos marcaram **3** → 3 × 2 = 6 pontos
+- 4 alunos marcaram **2** → 4 × 1 = 4 pontos
+- 2 alunos marcaram **1** → 2 × 0 = 0 pontos
+- 1 aluno deixou em **B** → 1 × 0 = 0 pontos
+- **Total para questão 5: 10 pontos**
+
+Esta pontuação é aplicada automaticamente ao agregar estatísticas para upload no Google Sheets através da função [`calculate_question_statistics()`](old_document_type/pipeline/helpers/update_cloud_statistics.py:59) em [`update_cloud_statistics.py`](old_document_type/pipeline/helpers/update_cloud_statistics.py:1).
    - O arquivo `matriz_assuntos_subatributos_populated.csv` deve estar na raiz
    - Contém o mapeamento de questões para assuntos matemáticos
 
+
+## 🔄 Fluxos de Trabalho Comuns
+
+### Cenário 1: Primeira vez processando gabaritos
+```bash
+# Use a opção 1 do menu interativo
+poetry run python pipeline/cli_menu.py
+# Escolha: 1 (Pipeline completo)
+# Digite o caminho: examples/
+```
+Isso fará tudo automaticamente: OCR → Master Table → Upload
+
+### Cenário 2: Apenas extrair dados (sem upload)
+```bash
+# Use a opção 2 do menu interativo
+poetry run python pipeline/cli_menu.py
+# Escolha: 2 (Apenas OCR)
+# Digite o caminho: examples/
+```
+Os CSVs serão salvos em `resultados/batch/`
+
+### Cenário 3: Já tenho CSVs, quero consolidar e enviar
+```bash
+# Use a opção 3 para consolidar
+poetry run python pipeline/cli_menu.py
+# Escolha: 3 (Apenas Master Table)
+# Digite o diretório: resultados/batch
+
+# Depois use a opção 4 para enviar
+poetry run python pipeline/cli_menu.py
+# Escolha: 4 (Apenas Upload)
+# Digite o caminho: resultados/batch/master_table.csv
+```
+
+### Cenário 4: Re-enviar dados para Google Sheets
+```bash
+# Se você já tem a master_table.csv e quer re-enviar
+poetry run python pipeline/cli_menu.py
+# Escolha: 4 (Apenas Upload)
+# Digite o caminho: resultados/batch/master_table.csv
+```
+
+### Cenário 5: Usar linha de comando (modo avançado)
+```bash
+# Pipeline completo via CLI
+poetry run python pipeline/main.py --full examples/
+
+# Apenas OCR via CLI
+poetry run python pipeline/main.py --batch examples/
+
+# Processar um único PDF
+poetry run python pipeline/main.py --image examples/gabarito.pdf
+```
 ### Configuração Padrão
 
 Os valores padrão estão definidos em `pipeline/helpers/extrair_table_qr.py`:
