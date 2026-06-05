@@ -21,16 +21,18 @@ def show_interactive_menu():
     print("  2 - Processar apenas OCR (gerar CSVs individuais)")
     print("  3 - Gerar apenas Master Table (a partir de CSVs existentes)")
     print("  4 - Upload para Google Sheets (a partir de Master Table)")
+    print("  5 - Gerar Média por Turma (a partir de Master Table)")
+    print("  6 - Gerar Média por Escola (a partir de Master Table)")
     print("  0 - Sair")
     print("=" * 60)
     
     while True:
         try:
             choice = input("\nDigite sua opção: ").strip()
-            if choice in ['0', '1', '2', '3', '4']:
+            if choice in ['0', '1', '2', '3', '4', '5', '6']:
                 return choice
             else:
-                print("❌ Opção inválida! Digite 0, 1, 2, 3 ou 4.")
+                print("❌ Opção inválida! Digite 0, 1, 2, 3, 4, 5 ou 6.")
         except (KeyboardInterrupt, EOFError):
             print("\n\n👋 Operação cancelada pelo usuário.")
             sys.exit(0)
@@ -128,6 +130,44 @@ def execute_option(choice: str):
         run_update(master_file, MATRIX_CSV, CREDENTIALS, SHEET_ID)
         
         print("\n✅ Upload finalizado!")
+    
+    elif choice == '5':
+        # Média por turma
+        print("\n📊 Gerando Média por Turma...")
+        master_file = input("Digite o caminho do arquivo master_table.csv: ").strip()
+        
+        if not Path(master_file).exists():
+            print(f"❌ Erro: Arquivo não encontrado: {master_file}")
+            sys.exit(1)
+        
+        # pyrefly: ignore [missing-import]
+        from helpers.generate_averages import generate_averages_by_turma
+        output_csv = generate_averages_by_turma(master_file)
+        
+        if output_csv:
+            print(f"\n✅ Média por turma salva em: {output_csv}")
+            print("   Colunas geradas: <subatributo>_num (numerador), <subatributo>_den (denominador), <subatributo>_avg (média)")
+        else:
+            print("\n❌ Erro ao gerar média por turma")
+    
+    elif choice == '6':
+        # Média por escola
+        print("\n🏫 Gerando Média por Escola...")
+        master_file = input("Digite o caminho do arquivo master_table.csv: ").strip()
+        
+        if not Path(master_file).exists():
+            print(f"❌ Erro: Arquivo não encontrado: {master_file}")
+            sys.exit(1)
+        
+        # pyrefly: ignore [missing-import]
+        from helpers.generate_averages import generate_averages_by_escola
+        output_csv = generate_averages_by_escola(master_file)
+        
+        if output_csv:
+            print(f"\n✅ Média por escola salva em: {output_csv}")
+            print("   Colunas geradas: <subatributo>_num (numerador), <subatributo>_den (denominador), <subatributo>_avg (média)")
+        else:
+            print("\n❌ Erro ao gerar média por escola")
 
 
 def main():
